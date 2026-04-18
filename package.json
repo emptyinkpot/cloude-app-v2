@@ -1,0 +1,14 @@
+{
+  "name": "cloude-app",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev:mobile": "npm --workspace apps/mobile run start",
+    "dev:api": "npm --workspace services/api run dev",
+    "lint": "npm --workspace services/api run lint"
+  }
+}

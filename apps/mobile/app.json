@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Cloude App",
+    "slug": "cloude-app",
+    "scheme": "cloude-app",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-router"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}
