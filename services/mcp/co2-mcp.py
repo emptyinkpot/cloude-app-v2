@@ -1,0 +1,135 @@
+"""CO2 Monitor MCP - runs INSIDE AstrBot Docker container (stdio transport).
+Calls co2-api on 127.0.0.1:3100 (container uses --network host).
+"""
+
+import asyncio
+import json
+import urllib.request
+
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
+
+app = Server("co2-mcp")
+
+API_BASE = "http://127.0.0.1:3100"
+
+
+def _fetch(path):
+    req = urllib.request.Request(f"{API_BASE}{path}")
+    resp = urllib.request.urlopen(req, timeout=10)
+    return json.loads(resp.read())
+
+
+@app.list_tools()
+async def list_tools():
+    return [
+        Tool(
+            name="co2_realtime",
+            description="查询当前 CO2 浓度、温湿度、设备在线状态",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
+            name="co2_predict",
+            description="查询 CO2 趋势预测、置信度、模型信息",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
+            name="co2_history",
+            description="查询最近1小时 CO2 历史摘要（最高/最低/均值）",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+    ]
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict):
+    if name == "co2_realtime":
+        return _handle_realtime()
+    elif name == "co2_predict":
+        return _handle_predict()
+    elif name == "co2_history":
+        return _handle_history()
+    return [TextContent(type="text", text=f"unknown tool: {name}")]
+
+
+def _handle_realtime():
+    try:
+        rt = _fetch("/api/v1/realtime/co2")
+        health = _fetch("/api/v1/health")
+    except Exception as e:
+        return [TextContent(type="text", text=f"查询失败: {e}")]
+
+    d = rt.get("data", {})
+    online = rt.get("online", False)
+    co2 = d.get("co2", 0)
+    level = "危险" if co2 >= 1500 else "预警" if co2 >= 1000 else "正常"
+
+    text = (
+        f"## CO2 实时状态\n"
+        f"- 浓度: {co2} ppm ({level})\n"
+        f"- 温度: {d.get('temp', '--')} °C\n"
+        f"- 湿度: {d.get('hum', '--')}% RH\n"
+        f"- 变化率: {d.get('slope', 0)} ppm/min\n"
+        f"- 设备: {'在线' if online else '离线'}"
+        f" ({d.get('dev', '--')})\n"
+        f"- MQTT: {'已连接' if health.get('mqtt') else '断开'}\n"
+        f"- 时间: {d.get('ts', '--')}"
+    )
+    return [TextContent(type="text", text=text)]
+
+
+def _handle_predict():
+    try:
+        res = _fetch("/api/v1/predict/co2")
+    except Exception as e:
+        return [TextContent(type="text", text=f"查询失败: {e}")]
+
+    text = (
+        f"## CO2 趋势预测\n"
+        f"- 置信度: {res.get('confidence', '--')}%\n"
+        f"- 环境因子: {res.get('env_factor', '--')}%\n"
+        f"- 趋势: {res.get('trend', '--')}\n"
+        f"- 模型: {res.get('model', '--')}\n"
+        f"- CO2-温度相关系数: {res.get('correlation', {}).get('co2_temp', '--')}\n"
+        f"- CO2-湿度相关系数: {res.get('correlation', {}).get('co2_hum', '--')}\n"
+        f"- 算法: {res.get('algorithm', '--')}"
+    )
+    forecast = res.get("forecast", [])
+    if forecast:
+        pts = ", ".join(f"{p.get('t')}: {p.get('co2')} ppm" for p in forecast[:6])
+        text += f"\n- 预测点: {pts}"
+    return [TextContent(type="text", text=text)]
+
+
+def _handle_history():
+    try:
+        res = _fetch("/api/v1/history/co2?range=1h")
+    except Exception as e:
+        return [TextContent(type="text", text=f"查询失败: {e}")]
+
+    points = res.get("points", [])
+    if not points:
+        return [TextContent(type="text", text="最近1小时无历史数据")]
+
+    values = [p.get("co2", 0) for p in points]
+    avg = sum(values) / len(values)
+    text = (
+        f"## CO2 最近1小时历史\n"
+        f"- 数据点数: {len(values)}\n"
+        f"- 最高: {max(values)} ppm\n"
+        f"- 最低: {min(values)} ppm\n"
+        f"- 均值: {avg:.0f} ppm\n"
+        f"- 最新: {values[-1]} ppm\n"
+        f"- 时间范围: {points[0].get('ts', '--')} → {points[-1].get('ts', '--')}"
+    )
+    return [TextContent(type="text", text=text)]
+
+
+async def main():
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(read_stream, write_stream, app.create_initialization_options())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
