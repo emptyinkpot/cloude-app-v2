@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CO2 监测仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh;padding:16px}
+.header{text-align:center;margin-bottom:20px}
+.header h1{font-size:1.4rem;color:#8892b0;font-weight:400}
+.co2-main{text-align:center;padding:30px 20px;background:#16213e;border-radius:16px;margin-bottom:16px}
+.co2-value{font-size:4.5rem;font-weight:700;line-height:1.1}
+.co2-unit{font-size:1.2rem;color:#8892b0;margin-top:4px}
+.co2-status{font-size:1rem;margin-top:8px;font-weight:500}
+.status-good{color:#00d68f}.status-warn{color:#ffaa00}.status-danger{color:#ff3d71}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.card{background:#16213e;border-radius:12px;padding:16px;text-align:center}
+.card-label{font-size:0.8rem;color:#8892b0;margin-bottom:6px}
+.card-value{font-size:1.8rem;font-weight:600}
+.card-sub{font-size:0.75rem;color:#8892b0;margin-top:4px}
+.device-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.dot-online{background:#00d68f;box-shadow:0 0 6px #00d68f}.dot-offline{background:#ff3d71}
+.chart-container{background:#16213e;border-radius:12px;padding:16px;margin-bottom:16px}
+.chart-container h3{font-size:0.9rem;color:#8892b0;margin-bottom:10px}
+.alerts-container{background:#16213e;border-radius:12px;padding:16px;margin-bottom:16px}
+.alerts-container h3{font-size:0.9rem;color:#8892b0;margin-bottom:10px}
+.alert-item{padding:8px 10px;border-left:3px solid #ffaa00;margin-bottom:8px;background:#1a1a2e;border-radius:0 8px 8px 0;font-size:0.8rem}
+.alert-item.level-critical{border-left-color:#ff3d71}
+.alert-time{color:#8892b0;font-size:0.7rem}
+.footer{background:#16213e;border-radius:12px;padding:12px 16px;font-size:0.75rem;color:#8892b0}
+.footer-row{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.trend-arrow{font-size:1.2rem}
+@media(max-width:480px){.co2-value{font-size:3rem}.grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="header"><h1>CO2 室内空气监测</h1></div>
+<div class="co2-main">
+  <div class="co2-value" id="co2Val">--</div>
+  <div class="co2-unit">ppm</div>
+  <div class="co2-status" id="co2Status">等待数据...</div>
+</div>
+<div class="grid">
+  <div class="card">
+    <div class="card-label">设备状态</div>
+    <div class="card-value"><span class="device-dot dot-offline" id="devDot"></span><span id="devText">离线</span></div>
+  </div>
+  <div class="card">
+    <div class="card-label">温度</div>
+    <div class="card-value" id="tempVal">--<span style="font-size:0.9rem">°C</span></div>
+  </div>
+  <div class="card">
+    <div class="card-label">湿度</div>
+    <div class="card-value" id="humVal">--<span style="font-size:0.9rem">%</span></div>
+  </div>
+  <div class="card">
+    <div class="card-label">趋势预测</div>
+    <div class="card-value"><span class="trend-arrow" id="trendArrow">—</span></div>
+    <div class="card-sub" id="etaText">--</div>
+  </div>
+</div>
+<div class="chart-container">
+  <h3>CO2 浓度趋势（最近 1 小时）</h3>
+  <canvas id="co2Chart" height="200"></canvas>
+</div>
+<div class="alerts-container">
+  <h3>报警记录</h3>
+  <div id="alertList"><div class="alert-item">暂无报警记录</div></div>
+</div>
+<div class="footer">
+  <div class="footer-row">
+    <span>MQTT: <span id="mqttStatus">--</span></span>
+    <span>心跳: <span id="lastHb">--</span></span>
+    <span>刷新: <span id="lastUpdate">--</span></span>
+  </div>
+</div>
+<script>
+const API_BASE='';
+let chart;
+function initChart(){
+  const ctx=document.getElementById('co2Chart').getContext('2d');
+  chart=new Chart(ctx,{type:'line',data:{labels:[],datasets:[{label:'CO2 (ppm)',data:[],borderColor:'#4fc3f7',backgroundColor:'rgba(79,195,247,0.1)',borderWidth:2,fill:true,tension:0.3,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{display:true,ticks:{color:'#8892b0',maxTicksLimit:6,font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}},y:{display:true,ticks:{color:'#8892b0',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}}},plugins:{legend:{display:false}}}});
+}
+function co2Color(v){if(v<1000)return'#00d68f';if(v<=1500)return'#ffaa00';return'#ff3d71'}
+function co2Class(v){if(v<1000)return'status-good';if(v<=1500)return'status-warn';return'status-danger'}
+function co2Label(v){if(v<1000)return'空气质量良好';if(v<=1500)return'注意通风';return'浓度过高！请立即通风'}
+</script>
+<script>
+function updateUI(d,online){
+  const co2=d.co2||0;
+  document.getElementById('co2Val').textContent=co2;
+  document.getElementById('co2Val').style.color=co2Color(co2);
+  const st=document.getElementById('co2Status');
+  st.textContent=co2Label(co2);st.className='co2-status '+co2Class(co2);
+  document.getElementById('tempVal').innerHTML=(d.temp||'--')+'<span style="font-size:0.9rem">°C</span>';
+  document.getElementById('humVal').innerHTML=(d.hum||'--')+'<span style="font-size:0.9rem">%</span>';
+  const dot=document.getElementById('devDot');
+  const dtx=document.getElementById('devText');
+  if(online){dot.className='device-dot dot-online';dtx.textContent='在线'}
+  else{dot.className='device-dot dot-offline';dtx.textContent='离线'}
+  const slope=d.slope||0;const eta=d.eta||-1;
+  const arrow=document.getElementById('trendArrow');
+  if(slope>0){arrow.textContent='↑';arrow.style.color='#ff3d71'}
+  else if(slope<0){arrow.textContent='↓';arrow.style.color='#00d68f'}
+  else{arrow.textContent='→';arrow.style.color='#8892b0'}
+  const etaEl=document.getElementById('etaText');
+  etaEl.textContent=eta>0?'预计 '+eta+' 分钟达标':'--';
+  document.getElementById('lastUpdate').textContent=new Date().toLocaleTimeString('zh-CN');
+}
+async function fetchRealtime(){
+  try{const r=await fetch(API_BASE+'/api/v1/realtime/co2');const j=await r.json();updateUI(j.data,j.online)}catch(e){console.error('realtime',e)}
+}
+async function fetchHistory(){
+  try{const r=await fetch(API_BASE+'/api/v1/history/co2?range=1h');const j=await r.json();
+  const pts=j.points||[];
+  chart.data.labels=pts.map(p=>new Date(p.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}));
+  chart.data.datasets[0].data=pts.map(p=>p.co2);chart.update()}catch(e){console.error('history',e)}
+}
+async function fetchAlerts(){
+  try{const r=await fetch(API_BASE+'/api/v1/alerts');const j=await r.json();
+  const items=(j.items||[]).slice(0,10);const el=document.getElementById('alertList');
+  if(!items.length){el.innerHTML='<div class="alert-item">暂无报警记录</div>';return}
+  el.innerHTML=items.map(a=>'<div class="alert-item'+(a.level==='critical'?' level-critical':'')+'"><span class="alert-time">'+new Date(a.ts).toLocaleString('zh-CN')+'</span> '+a.message+' ('+a.co2+' ppm)</div>').join('')}catch(e){console.error('alerts',e)}
+}
+async function fetchHealth(){
+  try{const r=await fetch(API_BASE+'/api/v1/health');const j=await r.json();
+  document.getElementById('mqttStatus').textContent=j.mqtt?'已连接':'断开';
+  document.getElementById('mqttStatus').style.color=j.mqtt?'#00d68f':'#ff3d71';
+  if(j.lastHeartbeat)document.getElementById('lastHb').textContent=new Date(j.lastHeartbeat).toLocaleTimeString('zh-CN')}catch(e){console.error('health',e)}
+}
+function connectWS(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  const ws=new WebSocket(proto+'//'+location.host+'/ws/realtime');
+  ws.onmessage=function(ev){try{const msg=JSON.parse(ev.data);if(msg.type==='realtime')updateUI(msg.data,true)}catch(e){}};
+  ws.onclose=function(){setTimeout(connectWS,5000)};
+  ws.onerror=function(){ws.close()};
+}
+initChart();fetchRealtime();fetchHistory();fetchAlerts();fetchHealth();
+setInterval(fetchRealtime,5000);setInterval(fetchHistory,60000);setInterval(fetchAlerts,30000);setInterval(fetchHealth,15000);
+connectWS();
+</script>
+</body>
+</html>
