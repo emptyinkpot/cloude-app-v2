@@ -263,12 +263,17 @@ function Co2TrendChart({
   height: number;
 }) {
   const actualValues = actual.map((point) => point.value);
-  const latestActualValue = actualValues[actualValues.length - 1];
+  const overlayPoints = actual.slice(-Math.min(actual.length, 45));
+  const latestOverlayValue = overlayPoints[overlayPoints.length - 1]?.value ?? actualValues[actualValues.length - 1];
   const predictionOffset = prediction.length > 0
-    ? latestActualValue - prediction[0].co2
+    ? latestOverlayValue - prediction[0].co2
     : 0;
   const predictionValues = prediction.map((point) => point.co2 + predictionOffset);
-  const values = [...actualValues, ...predictionValues].filter(Number.isFinite);
+  const values = [
+    ...actualValues,
+    ...overlayPoints.map((point) => point.value),
+    ...predictionValues
+  ].filter(Number.isFinite);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const yMin = Math.max(0, Math.floor((rawMin - 40) / 50) * 50);
@@ -276,22 +281,27 @@ function Co2TrendChart({
   const plotWidth = width - CHART_PAD.left - CHART_PAD.right;
   const plotHeight = height - CHART_PAD.top - CHART_PAD.bottom;
   const hasPrediction = prediction.length > 0;
-  const actualStartX = CHART_PAD.left;
-  const actualEndX = hasPrediction
-    ? CHART_PAD.left + plotWidth * 0.78
-    : CHART_PAD.left + plotWidth;
+  const firstActualTime = actual[0]?.time ?? Date.now();
+  const lastActualTime = actual[actual.length - 1]?.time ?? firstActualTime;
+  const fitLeadMs = 10 * 60 * 1000;
+  const timelineStart = firstActualTime;
+  const timelineEnd = hasPrediction ? lastActualTime + fitLeadMs : lastActualTime + 1;
+  const toTimelineX = (time: number) =>
+    CHART_PAD.left + ((time - timelineStart) / Math.max(1, timelineEnd - timelineStart)) * plotWidth;
+  const predictionStartX = toTimelineX(lastActualTime);
   const predictionEndX = CHART_PAD.left + plotWidth;
-  const toActualX = (index: number, total: number) =>
-    actualStartX + (total <= 1 ? 0 : (index / (total - 1)) * (actualEndX - actualStartX));
   const toPredictionX = (index: number, total: number) =>
-    actualEndX + (total <= 1 ? 0 : (index / (total - 1)) * (predictionEndX - actualEndX));
+    predictionStartX + (total <= 1 ? 0 : (index / (total - 1)) * (predictionEndX - predictionStartX));
   const toY = (value: number) =>
     CHART_PAD.top + ((yMax - value) / Math.max(1, yMax - yMin)) * plotHeight;
   const actualPath = buildPath(
     actualValues,
-    (index) => toActualX(index, actualValues.length),
+    (index) => toTimelineX(actual[index].time),
     toY
   );
+  const overlayPath = overlayPoints
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${toTimelineX(point.time).toFixed(1)} ${toY(point.value).toFixed(1)}`)
+    .join(" ");
   const predictionSeries = hasPrediction ? predictionValues : [];
   const predictionPath = buildPath(
     predictionSeries,
@@ -301,7 +311,7 @@ function Co2TrendChart({
   const lastActual = actual[actual.length - 1];
   const firstLabel = actual[0]?.label ?? "--";
   const lastLabel = lastActual?.label ?? "--";
-  const lastActualX = actualEndX;
+  const lastActualX = predictionStartX;
   const lastLabelX = hasPrediction
     ? Math.min(Math.max(CHART_PAD.left, lastActualX - 20), width - CHART_PAD.right - 38)
     : width - CHART_PAD.right - 36;
@@ -344,19 +354,39 @@ function Co2TrendChart({
             />
           );
         })}
-        <Path d={actualPath} stroke="#4fc3f7" strokeWidth={3} fill="none" />
+        <Path
+          d={actualPath}
+          stroke="#4fc3f7"
+          strokeWidth={3}
+          fill="none"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {overlayPath && (
+          <Path
+            d={overlayPath}
+            stroke="#ff8a00"
+            strokeWidth={5}
+            fill="none"
+            opacity={0.9}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )}
         {predictionPath && (
           <Path
-            d={`M ${lastActualX.toFixed(1)} ${toY(lastActual.value).toFixed(1)} ${predictionPath.replace(/^M\s+/, "L ")}`}
+            d={`M ${lastActualX.toFixed(1)} ${toY(latestOverlayValue).toFixed(1)} ${predictionPath.replace(/^M\s+/, "L ")}`}
             stroke="#ffaa00"
             strokeWidth={4}
             fill="none"
             strokeDasharray="6 5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
           />
         )}
         <Circle
           cx={lastActualX}
-          cy={toY(lastActual.value)}
+          cy={toY(latestOverlayValue)}
           r={5}
           fill={hasPrediction ? "#ffaa00" : "#4fc3f7"}
         />
@@ -391,10 +421,10 @@ function downsamplePoints(points: ChartPoint[], maxPoints: number) {
   return points.filter((_, index) => index % stride === 0 || index === points.length - 1);
 }
 
-function buildPath(
-  values: number[],
+function buildPath<T>(
+  values: T[],
   toX: (index: number) => number,
-  toY: (value: number) => number
+  toY: (value: T) => number
 ) {
   return values
     .map((value, index) => `${index === 0 ? "M" : "L"} ${toX(index).toFixed(1)} ${toY(value).toFixed(1)}`)
