@@ -191,12 +191,80 @@ function holtWinters(data, alpha = 0.3, beta = 0.1, horizon = 30) {
   return predictions;
 }
 
-// --- CO2 Prediction Endpoint ---
+// --- Adaptive regression: picks best model (linear vs quadratic) on short window ---
+function adaptiveRegression(data) {
+  const n = data.length;
+  if (n < 3) return { slope: 0, accel: 0, r2: 0, model: "none" };
+
+  // Linear regression
+  let sx = 0, sy = 0, sxy = 0, sx2 = 0;
+  for (let i = 0; i < n; i++) {
+    sx += i; sy += data[i]; sxy += i * data[i]; sx2 += i * i;
+  }
+  const linDenom = n * sx2 - sx * sx;
+  let linB = 0, linA = 0;
+  if (Math.abs(linDenom) > 1e-6) {
+    linB = (n * sxy - sx * sy) / linDenom;
+    linA = (sy - linB * sx) / n;
+  }
+  let linSsRes = 0, ssTot = 0;
+  const mean = sy / n;
+  for (let i = 0; i < n; i++) {
+    linSsRes += (data[i] - (linA + linB * i)) ** 2;
+    ssTot += (data[i] - mean) ** 2;
+  }
+  const linR2 = ssTot > 0 ? Math.max(0, 1 - linSsRes / ssTot) : 1;
+
+  // Quadratic regression
+  let qsx = 0, qsx2 = 0, qsx3 = 0, qsx4 = 0;
+  let qsy = 0, qsxy = 0, qsx2y = 0;
+  for (let i = 0; i < n; i++) {
+    qsx += i; qsx2 += i*i; qsx3 += i*i*i; qsx4 += i*i*i*i;
+    qsy += data[i]; qsxy += i*data[i]; qsx2y += i*i*data[i];
+  }
+  const qd = n*(qsx2*qsx4-qsx3*qsx3) - qsx*(qsx*qsx4-qsx3*qsx2) + qsx2*(qsx*qsx3-qsx2*qsx2);
+  let qa = 0, qb = 0, qc = 0;
+  if (Math.abs(qd) > 1e-6) {
+    qc = (qsy*(qsx2*qsx4-qsx3*qsx3)-qsx*(qsxy*qsx4-qsx2y*qsx3)+qsx2*(qsxy*qsx3-qsx2y*qsx2))/qd;
+    qb = (n*(qsxy*qsx4-qsx2y*qsx3)-qsy*(qsx*qsx4-qsx3*qsx2)+qsx2*(qsx*qsx2y-qsxy*qsx2))/qd;
+    qa = (n*(qsx2*qsx2y-qsx3*qsxy)-qsx*(qsx*qsx2y-qsxy*qsx2)+qsy*(qsx*qsx3-qsx2*qsx2))/qd;
+  }
+  let quadSsRes = 0;
+  for (let i = 0; i < n; i++) {
+    quadSsRes += (data[i] - (qa*i*i + qb*i + qc)) ** 2;
+  }
+  const quadR2 = ssTot > 0 ? Math.max(0, 1 - quadSsRes / ssTot) : 1;
+
+  if (quadR2 > linR2 && quadR2 > 0.7) {
+    const deriv1 = 2 * qa * (n - 1) + qb;
+    const deriv2 = 2 * qa;
+    return { slope: deriv1, accel: deriv2, r2: quadR2, model: "quadratic", a: qa, b: qb, c: qc };
+  }
+  return { slope: linB, accel: 0, r2: linR2, model: "linear", a: 0, b: linB, c: linA };
+}
+
+// --- Pearson correlation ---
+function pearsonCorr(x, y) {
+  const n = x.length;
+  if (n < 3) return 0;
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) { mx += x[i]; my += y[i]; }
+  mx /= n; my /= n;
+  let sxy = 0, sx2 = 0, sy2 = 0;
+  for (let i = 0; i < n; i++) {
+    sxy += (x[i] - mx) * (y[i] - my);
+    sx2 += (x[i] - mx) ** 2;
+    sy2 += (y[i] - my) ** 2;
+  }
+  if (sx2 < 1 || sy2 < 1) return 0;
+  return sxy / Math.sqrt(sx2 * sy2);
+}
+
+// --- CO2 Prediction Endpoint (multi-variable fusion) ---
 app.get("/api/v1/predict/co2", async (_req, res) => {
   try {
-    // Fetch last 30 minutes of data (~360 points at 5s interval)
     const { rows } = await pool.query(
-      "SELECT co2, slope, trend FROM readings WHERE ts > NOW() - INTERVAL '30 minutes' ORDER BY ts ASC"
+      "SELECT co2, temperature, humidity FROM readings WHERE ts > NOW() - INTERVAL '5 minutes' ORDER BY ts ASC"
     );
 
     if (rows.length < 10) {
@@ -204,91 +272,88 @@ app.get("/api/v1/predict/co2", async (_req, res) => {
     }
 
     const co2Data = rows.map((r) => r.co2);
+    const tempData = rows.map((r) => r.temperature);
+    const humData = rows.map((r) => r.humidity);
     const current = co2Data[co2Data.length - 1];
 
-    // EWMA filter for current filtered value
+    // EWMA filter
     let filtered = co2Data[0];
-    const ewmaAlpha = 0.3;
     for (let i = 1; i < co2Data.length; i++) {
-      filtered = ewmaAlpha * co2Data[i] + (1 - ewmaAlpha) * filtered;
+      filtered = 0.3 * co2Data[i] + 0.7 * filtered;
     }
     filtered = Math.round(filtered);
 
-    // Quadratic regression on recent data for slope/accel
-    const n = co2Data.length;
-    let sx = 0, sx2 = 0, sx3 = 0, sx4 = 0;
-    let sy = 0, sxy = 0, sx2y = 0;
-    for (let i = 0; i < n; i++) {
-      const x = i, y = co2Data[i];
-      sx += x; sx2 += x * x; sx3 += x * x * x; sx4 += x * x * x * x;
-      sy += y; sxy += x * y; sx2y += x * x * y;
-    }
-    const d = n*(sx2*sx4-sx3*sx3) - sx*(sx*sx4-sx3*sx2) + sx2*(sx*sx3-sx2*sx2);
-    let a = 0, b = 0, c = 0;
-    if (Math.abs(d) > 1e-6) {
-      c = (sy*(sx2*sx4-sx3*sx3)-sx*(sxy*sx4-sx2y*sx3)+sx2*(sxy*sx3-sx2y*sx2))/d;
-      b = (n*(sxy*sx4-sx2y*sx3)-sy*(sx*sx4-sx3*sx2)+sx2*(sx*sx2y-sxy*sx2))/d;
-      a = (n*(sx2*sx2y-sx3*sxy)-sx*(sx*sx2y-sxy*sx2)+sy*(sx*sx3-sx2*sx2))/d;
-    }
-
-    // Derivatives at current point (ppm/min)
+    // Adaptive regression on 5-min CO2 window
     const intervalSec = 5;
-    const deriv1 = (2 * a * (n - 1) + b) * (60 / intervalSec);
-    const deriv2 = (2 * a) * (3600 / (intervalSec * intervalSec));
+    const reg = adaptiveRegression(co2Data);
+    const slopePerMin = reg.slope * (60 / intervalSec);
+    const accelPerMin2 = reg.accel * (3600 / (intervalSec * intervalSec));
 
-    // R-squared
-    let mean = sy / n, ssRes = 0, ssTot = 0;
-    for (let i = 0; i < n; i++) {
-      const yhat = a * i * i + b * i + c;
-      ssRes += (co2Data[i] - yhat) ** 2;
-      ssTot += (co2Data[i] - mean) ** 2;
+    // Multi-variable correlation
+    const co2TempCorr = pearsonCorr(co2Data, tempData);
+    const co2HumCorr = pearsonCorr(co2Data, humData);
+
+    // Environment support factor (0-100)
+    let envFactor = 0;
+    if (slopePerMin > 0) {
+      const tempReg = adaptiveRegression(tempData);
+      const humReg = adaptiveRegression(humData);
+      if (tempReg.slope > 0) envFactor += 25;
+      if (humReg.slope > 0) envFactor += 25;
+      if (co2TempCorr > 0.5) envFactor += 25;
+      if (co2HumCorr > 0.5) envFactor += 25;
+    } else if (slopePerMin < 0) {
+      const tempReg = adaptiveRegression(tempData);
+      const humReg = adaptiveRegression(humData);
+      if (tempReg.slope < 0) envFactor += 25;
+      if (humReg.slope < 0) envFactor += 25;
+      if (co2TempCorr > 0.5) envFactor += 25;
+      if (co2HumCorr > 0.5) envFactor += 25;
     }
-    const r2 = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 1;
-    const confidence = Math.round(r2 * 100);
+
+    // Confidence: blend R² with env support
+    const rawConf = Math.round(reg.r2 * 100);
+    const confidence = Math.min(100, rawConf + Math.round(envFactor * 0.2));
 
     // Trend label
     let trendLabel = "stable";
-    if (deriv1 > 2 && deriv2 > 0.5) trendLabel = "accelerating";
-    else if (deriv1 > 1) trendLabel = "rising";
-    else if (deriv1 < -1) trendLabel = "falling";
+    if (slopePerMin > 2 && (accelPerMin2 > 0.5 || envFactor >= 50)) trendLabel = "accelerating";
+    else if (slopePerMin > 1) trendLabel = "rising";
+    else if (slopePerMin < -2 && envFactor >= 50) trendLabel = "falling_fast";
+    else if (slopePerMin < -1) trendLabel = "falling";
 
-    // Holt-Winters prediction (30 min horizon, 1 point/min)
-    // Downsample to 1-min averages first
+    // Holt-Winters prediction on 1-min averages
     const perMin = Math.round(60 / intervalSec);
     const minuteData = [];
     for (let i = 0; i < co2Data.length; i += perMin) {
       const slice = co2Data.slice(i, i + perMin);
       minuteData.push(slice.reduce((s, v) => s + v, 0) / slice.length);
     }
-    const predictions = holtWinters(minuteData, 0.3, 0.1, 30);
+    const predictions = holtWinters(minuteData, 0.4, 0.15, 30);
 
-    const points = predictions.map((v, i) => ({
-      t: `+${i + 1}min`,
-      co2: v,
-    }));
+    const points = predictions.map((v, i) => ({ t: `+${i + 1}min`, co2: v }));
 
-    // ETA to thresholds
     let etaWarning = null, etaAlarm = null;
     for (let i = 0; i < predictions.length; i++) {
-      if (etaWarning === null && predictions[i] >= 1000)
-        etaWarning = (i + 1) * 60;
-      if (etaAlarm === null && predictions[i] >= 1500)
-        etaAlarm = (i + 1) * 60;
+      if (etaWarning === null && predictions[i] >= 1000) etaWarning = (i + 1) * 60;
+      if (etaAlarm === null && predictions[i] >= 1500) etaAlarm = (i + 1) * 60;
     }
 
     res.json({
       current,
       filtered,
-      slope: Math.round(deriv1 * 10) / 10,
-      accel: Math.round(deriv2 * 10) / 10,
+      slope: Math.round(slopePerMin * 10) / 10,
+      accel: Math.round(accelPerMin2 * 10) / 10,
       confidence,
       trend: trendLabel,
-      prediction: {
-        points,
-        eta_warning: etaWarning,
-        eta_alarm: etaAlarm,
+      model: reg.model,
+      correlation: {
+        co2_temp: Math.round(co2TempCorr * 100) / 100,
+        co2_hum: Math.round(co2HumCorr * 100) / 100,
       },
-      algorithm: "quadratic_regression + holt_winters",
+      env_factor: envFactor,
+      prediction: { points, eta_warning: etaWarning, eta_alarm: etaAlarm },
+      algorithm: "adaptive_regression + multi_variable_fusion + holt_winters",
     });
   } catch (e) {
     console.error("predict error:", e.message);
