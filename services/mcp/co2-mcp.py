@@ -39,6 +39,11 @@ async def list_tools():
             description="查询最近1小时 CO2 历史摘要（最高/最低/均值）",
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
+        Tool(
+            name="co2_weather",
+            description="对比室内外环境：室内CO2/温湿度 vs 当地天气，给出通风建议",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
     ]
 
 
@@ -50,6 +55,8 @@ async def call_tool(name: str, arguments: dict):
         return _handle_predict()
     elif name == "co2_history":
         return _handle_history()
+    elif name == "co2_weather":
+        return _handle_weather()
     return [TextContent(type="text", text=f"unknown tool: {name}")]
 
 
@@ -142,6 +149,43 @@ def _handle_history():
         f"- 最新: {values[-1]} ppm\n"
         f"- 时间范围: {points[0].get('ts', '--')} → {points[-1].get('ts', '--')}"
     )
+    return [TextContent(type="text", text=text)]
+
+
+def _handle_weather():
+    try:
+        res = _fetch("/api/v1/weather/compare")
+    except Exception as e:
+        return [TextContent(type="text", text=f"查询失败: {e}")]
+
+    indoor = res.get("indoor", {})
+    outdoor = res.get("outdoor", {})
+    comp = res.get("comparison")
+
+    text = f"## 室内外环境对比\n"
+    text += f"### 室内（传感器）\n"
+    text += f"- CO2: {indoor.get('co2', '--')} ppm\n"
+    text += f"- 温度: {indoor.get('temp', '--')} °C\n"
+    text += f"- 湿度: {indoor.get('hum', '--')}% RH\n"
+    text += f"- 设备: {'在线' if indoor.get('online') else '离线'}\n"
+    text += f"- BSSID: {indoor.get('bssid', '--')}\n"
+
+    if outdoor.get("error"):
+        text += f"\n### 室外天气\n- 未配置天气 API ({outdoor['error']})"
+    else:
+        text += f"\n### 室外天气（当地实时）\n"
+        text += f"- 天气: {outdoor.get('text', '--')}\n"
+        text += f"- 温度: {outdoor.get('temp', '--')} °C\n"
+        text += f"- 体感: {outdoor.get('feelsLike', '--')} °C\n"
+        text += f"- 湿度: {outdoor.get('humidity', '--')}%\n"
+        text += f"- 风向: {outdoor.get('windDir', '--')} {outdoor.get('windScale', '--')}级\n"
+
+    if comp:
+        text += f"\n### 对比分析\n"
+        text += f"- 温差: {comp.get('temp_diff', '--')} °C（室内-室外）\n"
+        text += f"- 湿度差: {comp.get('hum_diff', '--')}%（室内-室外）\n"
+        text += f"- 建议: {comp.get('ventilation_advice', '--')}"
+
     return [TextContent(type="text", text=text)]
 
 

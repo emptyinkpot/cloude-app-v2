@@ -125,6 +125,32 @@ mqttClient.on("message", async (_topic, payload) => {
 
 mqttClient.on("error", (err) => console.error("MQTT error:", err.message));
 
+// --- Weather comparison (uses device location from BSSID or fixed config) ---
+const WEATHER_API_KEY = process.env.WEATHER_API_KEY || "";
+const DEVICE_LOCATION = process.env.DEVICE_LOCATION || "121.47,31.23"; // lon,lat (Shanghai default)
+
+async function fetchOutdoorWeather() {
+  if (!WEATHER_API_KEY) return null;
+  const [lon, lat] = DEVICE_LOCATION.split(",");
+  const url = `https://devapi.qweather.com/v7/weather/now?location=${lon},${lat}&key=${WEATHER_API_KEY}`;
+  try {
+    const resp = await fetch(url);
+    const json = await resp.json();
+    if (json.code === "200" && json.now) {
+      return {
+        temp: parseFloat(json.now.temp),
+        humidity: parseFloat(json.now.humidity),
+        text: json.now.text,
+        windDir: json.now.windDir,
+        windScale: json.now.windScale,
+        feelsLike: parseFloat(json.now.feelsLike),
+        obsTime: json.now.obsTime,
+      };
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
 
 // --- Schemas ---
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(6) });
@@ -178,6 +204,42 @@ app.get("/api/v1/realtime/co2", async (_req, res) => {
   const online = Date.now() - lastHeartbeat < 15000;
   res.json({ data: latestData, online });
 });
+
+app.get("/api/v1/weather/compare", async (_req, res) => {
+  const indoor = latestData || {};
+  const outdoor = await fetchOutdoorWeather();
+  const online = Date.now() - lastHeartbeat < 15000;
+  const result = {
+    indoor: {
+      co2: indoor.co2 || 0,
+      temp: indoor.temp || 0,
+      hum: indoor.hum || 0,
+      bssid: indoor.bssid || "",
+      online,
+    },
+    outdoor: outdoor || { error: "WEATHER_API_KEY not configured" },
+    comparison: null,
+  };
+  if (outdoor && indoor.temp !== undefined) {
+    result.comparison = {
+      temp_diff: Math.round((indoor.temp - outdoor.temp) * 10) / 10,
+      hum_diff: Math.round((indoor.hum - outdoor.humidity) * 10) / 10,
+      ventilation_advice: getVentilationAdvice(indoor, outdoor),
+    };
+  }
+  res.json(result);
+});
+
+function getVentilationAdvice(indoor, outdoor) {
+  if (indoor.co2 >= 1500) return "CO2 危险，立即开窗通风";
+  if (indoor.co2 >= 1000 && outdoor.temp >= 5 && outdoor.temp <= 35)
+    return "CO2 偏高，建议开窗通风";
+  if (indoor.co2 >= 1000 && (outdoor.temp < 5 || outdoor.temp > 35))
+    return "CO2 偏高，但室外温度极端，建议短时通风";
+  if (indoor.temp - outdoor.temp > 10)
+    return "室内外温差大，通风时注意保暖";
+  return "空气质量正常";
+}
 
 
 app.get("/api/v1/history/co2", async (req, res) => {
