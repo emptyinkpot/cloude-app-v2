@@ -125,26 +125,31 @@ mqttClient.on("message", async (_topic, payload) => {
 
 mqttClient.on("error", (err) => console.error("MQTT error:", err.message));
 
-// --- Weather comparison (uses wttr.in, no API key needed) ---
-const DEVICE_LOCATION = process.env.DEVICE_LOCATION || "Shanghai";
+// --- Weather comparison (uses sojson free API, China-accessible, no key needed) ---
+const DEVICE_CITY_CODE = process.env.DEVICE_CITY_CODE || "101020100"; // Shanghai
 
 async function fetchOutdoorWeather() {
-  const url = `https://wttr.in/${encodeURIComponent(DEVICE_LOCATION)}?format=j1`;
+  const url = `http://t.weather.sojson.com/api/weather/city/${DEVICE_CITY_CODE}`;
   try {
-    const resp = await fetch(url, { headers: { "User-Agent": "co2-api/1.0" } });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
     const json = await resp.json();
-    const cur = json.current_condition && json.current_condition[0];
-    if (!cur) return null;
+    if (json.status !== 200 || !json.data) return null;
+    const d = json.data;
+    const today = d.forecast && d.forecast[0];
     return {
-      temp: parseFloat(cur.temp_C),
-      humidity: parseFloat(cur.humidity),
-      text: cur.weatherDesc && cur.weatherDesc[0] && cur.weatherDesc[0].value || "",
-      windDir: cur.winddir16Point || "",
-      windSpeed: cur.windspeedKmph || "",
-      feelsLike: parseFloat(cur.FeelsLikeC),
-      obsTime: cur.observation_time || "",
+      temp: parseFloat(d.wendu),
+      humidity: parseInt(d.shidu),
+      text: today ? today.type : "",
+      windDir: today ? today.fx : "",
+      windScale: today ? today.fl : "",
+      feelsLike: parseFloat(d.wendu),
+      pm25: d.pm25,
+      quality: d.quality,
     };
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* timeout or network error */ }
   return null;
 }
 
