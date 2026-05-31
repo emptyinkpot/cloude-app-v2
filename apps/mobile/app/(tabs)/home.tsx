@@ -55,6 +55,12 @@ interface PredictResponse {
 interface ChartPoint {
   label: string;
   value: number;
+  time: number;
+}
+
+interface PredictionPoint {
+  t: string;
+  co2: number;
 }
 
 export default function HomeScreen() {
@@ -75,7 +81,7 @@ export default function HomeScreen() {
   const [predictionMae, setPredictionMae] = useState<number | null>(null);
   const [predictionRmse, setPredictionRmse] = useState<number | null>(null);
   const [historyPoints, setHistoryPoints] = useState<ChartPoint[]>([]);
-  const [predictData, setPredictData] = useState<number[]>([]);
+  const [predictData, setPredictData] = useState<PredictionPoint[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -91,7 +97,7 @@ export default function HomeScreen() {
           setPredictionMae(res.error?.mae ?? null);
           setPredictionRmse(res.error?.rmse ?? null);
           if (res.prediction?.points) {
-            setPredictData(res.prediction.points.map(p => p.co2));
+            setPredictData(res.prediction.points);
           }
         })
         .catch(() => {});
@@ -119,7 +125,8 @@ export default function HomeScreen() {
           const d = new Date(p.ts);
           return {
             label: `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`,
-            value: p.co2
+            value: p.co2,
+            time: d.getTime()
           };
         }));
       })
@@ -148,7 +155,8 @@ export default function HomeScreen() {
           ...points,
           {
             label: `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`,
-            value: data.co2
+            value: data.co2,
+            time: d.getTime()
           }
         ];
         return next.slice(-720);
@@ -239,35 +247,57 @@ function Co2TrendChart({
   height
 }: {
   actual: ChartPoint[];
-  prediction: number[];
+  prediction: PredictionPoint[];
   width: number;
   height: number;
 }) {
   const actualValues = actual.map((point) => point.value);
-  const values = [...actualValues, ...prediction].filter(Number.isFinite);
+  const predictionValues = prediction.map((point) => point.co2);
+  const values = [...actualValues, ...predictionValues].filter(Number.isFinite);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const yMin = Math.max(0, Math.floor((rawMin - 40) / 50) * 50);
   const yMax = Math.ceil((rawMax + 40) / 50) * 50;
   const plotWidth = width - CHART_PAD.left - CHART_PAD.right;
   const plotHeight = height - CHART_PAD.top - CHART_PAD.bottom;
-  const toX = (index: number, total: number) =>
-    CHART_PAD.left + (total <= 1 ? 0 : (index / (total - 1)) * plotWidth);
+  const hasPrediction = prediction.length > 0;
+  const firstActualTime = actual[0]?.time ?? Date.now();
+  const lastActualTime = actual[actual.length - 1]?.time ?? firstActualTime;
+  const predictionLeadMs = hasPrediction
+    ? Math.max(...prediction.map((point) => parsePredictionLeadMs(point.t)))
+    : 0;
+  const timelineStart = firstActualTime;
+  const timelineEnd = Math.max(lastActualTime + predictionLeadMs, lastActualTime + 1);
+  const toTimelineX = (time: number) =>
+    CHART_PAD.left + ((time - timelineStart) / Math.max(1, timelineEnd - timelineStart)) * plotWidth;
   const toY = (value: number) =>
     CHART_PAD.top + ((yMax - value) / Math.max(1, yMax - yMin)) * plotHeight;
-  const actualPath = buildPath(actualValues, toX, toY);
+  const actualPath = buildPath(
+    actualValues,
+    (index) => toTimelineX(actual[index].time),
+    toY
+  );
+  const predictionSeries = hasPrediction
+    ? [
+        { value: actualValues[actualValues.length - 1], time: lastActualTime },
+        ...prediction.map((point) => ({
+          value: point.co2,
+          time: lastActualTime + parsePredictionLeadMs(point.t)
+        }))
+      ]
+    : [];
   const predictionPath = buildPath(
-    prediction.length > 0 ? [actualValues[actualValues.length - 1], ...prediction] : [],
-    (index, total) => {
-      const start = CHART_PAD.left + plotWidth * 0.78;
-      const segment = plotWidth * 0.22;
-      return start + (total <= 1 ? 0 : (index / (total - 1)) * segment);
-    },
+    predictionSeries.map((point) => point.value),
+    (index) => toTimelineX(predictionSeries[index].time),
     toY
   );
   const lastActual = actual[actual.length - 1];
   const firstLabel = actual[0]?.label ?? "--";
   const lastLabel = lastActual?.label ?? "--";
+  const lastActualX = toTimelineX(lastActualTime);
+  const lastLabelX = hasPrediction
+    ? Math.min(Math.max(CHART_PAD.left, lastActualX - 20), width - CHART_PAD.right - 38)
+    : width - CHART_PAD.right - 36;
   const ticks = [yMin, Math.round((yMin + yMax) / 2), yMax];
   const thresholdLines = [1000, 1500].filter((value) => value >= yMin && value <= yMax);
 
@@ -318,7 +348,7 @@ function Co2TrendChart({
           />
         )}
         <Circle
-          cx={toX(actualValues.length - 1, actualValues.length)}
+          cx={lastActualX}
           cy={toY(lastActual.value)}
           r={4}
           fill="#4fc3f7"
@@ -326,9 +356,14 @@ function Co2TrendChart({
         <SvgText x={CHART_PAD.left} y={height - 8} fill="#60727b" fontSize={10}>
           {firstLabel}
         </SvgText>
-        <SvgText x={width - CHART_PAD.right - 36} y={height - 8} fill="#60727b" fontSize={10}>
+        <SvgText x={lastLabelX} y={height - 8} fill="#60727b" fontSize={10}>
           {lastLabel}
         </SvgText>
+        {hasPrediction && (
+          <SvgText x={width - CHART_PAD.right - 38} y={height - 8} fill="#60727b" fontSize={10}>
+            {prediction[prediction.length - 1]?.t ?? `+${prediction.length}min`}
+          </SvgText>
+        )}
         <SvgText x={width - CHART_PAD.right - 52} y={CHART_PAD.top + 12} fill="#102027" fontSize={11}>
           {Math.round(lastActual.value)} ppm
         </SvgText>
@@ -349,13 +384,21 @@ function downsamplePoints(points: ChartPoint[], maxPoints: number) {
   return points.filter((_, index) => index % stride === 0 || index === points.length - 1);
 }
 
+function parsePredictionLeadMs(label: string) {
+  const match = /^\+(\d+)\s*(min|m|s)?$/i.exec(label.trim());
+  if (!match) return 0;
+  const value = Number(match[1]);
+  const unit = match[2]?.toLowerCase();
+  return unit === "s" ? value * 1000 : value * 60 * 1000;
+}
+
 function buildPath(
   values: number[],
-  toX: (index: number, total: number) => number,
+  toX: (index: number) => number,
   toY: (value: number) => number
 ) {
   return values
-    .map((value, index) => `${index === 0 ? "M" : "L"} ${toX(index, values.length).toFixed(1)} ${toY(value).toFixed(1)}`)
+    .map((value, index) => `${index === 0 ? "M" : "L"} ${toX(index).toFixed(1)} ${toY(value).toFixed(1)}`)
     .join(" ");
 }
 
