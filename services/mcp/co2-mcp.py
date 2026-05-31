@@ -85,20 +85,39 @@ def _handle_predict():
     except Exception as e:
         return [TextContent(type="text", text=f"查询失败: {e}")]
 
+    error = res.get("error", {})
+    mae = error.get("mae")
+    rmse = error.get("rmse")
+    error_text = "暂无足够回测样本"
+    if mae is not None and rmse is not None:
+        error_text = f"平均误差 ±{mae} ppm，RMSE {rmse} ppm"
+
     text = (
         f"## CO2 趋势预测\n"
+        f"- 当前浓度: {res.get('current', '--')} ppm\n"
+        f"- 滤波值: {res.get('filtered', '--')} ppm\n"
+        f"- 变化率: {res.get('slope', '--')} ppm/min\n"
         f"- 置信度: {res.get('confidence', '--')}%\n"
         f"- 环境因子: {res.get('env_factor', '--')}%\n"
         f"- 趋势: {res.get('trend', '--')}\n"
         f"- 模型: {res.get('model', '--')}\n"
+        f"- 预测误差: {error_text}\n"
+        f"- 回测样本: {error.get('samples', 0)} 个1分钟点\n"
+        f"- 数据窗口: {res.get('data_freshness', '--')} / {res.get('samples', '--')} 条样本\n"
         f"- CO2-温度相关系数: {res.get('correlation', {}).get('co2_temp', '--')}\n"
         f"- CO2-湿度相关系数: {res.get('correlation', {}).get('co2_hum', '--')}\n"
         f"- 算法: {res.get('algorithm', '--')}"
     )
-    forecast = res.get("forecast", [])
+    forecast = res.get("prediction", {}).get("points") or res.get("forecast", [])
     if forecast:
         pts = ", ".join(f"{p.get('t')}: {p.get('co2')} ppm" for p in forecast[:6])
         text += f"\n- 预测点: {pts}"
+        eta = res.get("prediction", {})
+        if eta.get("eta_warning") is not None or eta.get("eta_alarm") is not None:
+            text += (
+                f"\n- ETA预警: {eta.get('eta_warning', '--')} 秒"
+                f"\n- ETA报警: {eta.get('eta_alarm', '--')} 秒"
+            )
     return [TextContent(type="text", text=text)]
 
 
