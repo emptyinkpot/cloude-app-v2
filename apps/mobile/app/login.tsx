@@ -131,7 +131,7 @@ function DashboardScreen() {
             <Text style={styles.statusText}>{level}</Text>
           </View>
         </View>
-        <Text style={styles.copy}>
+        <Text style={styles.loginCopy}>
           {online ? "设备在线" : "设备离线"} / {deviceId} / 5s 采样
         </Text>
         <View style={styles.metricGrid}>
@@ -195,7 +195,7 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: "800"
   },
-  copy: {
+  loginCopy: {
     color: "#584636",
     fontSize: 15,
     lineHeight: 22

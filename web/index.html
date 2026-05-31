@@ -37,6 +37,7 @@ body{height:100vh;overflow:hidden;display:flex;flex-direction:column;font-family
     <div class="pill"><b id="pHum">--</b>%</div>
     <div class="pill"><b id="pTrend">--</b></div>
     <div class="pill">conf <b id="pConf">--</b></div>
+    <div class="pill">err <b id="pErr">--</b></div>
     <div class="pill">slope <b id="pSlope">--</b></div>
   </div>
 </div>
@@ -80,7 +81,7 @@ function updateUI(d,online){
   document.getElementById('pTemp').textContent=d.temp!=null?d.temp.toFixed(1):'--';
   document.getElementById('pHum').textContent=d.hum!=null?d.hum.toFixed(0):'--';
   document.getElementById('pTrend').textContent=d.trend||'--';
-  document.getElementById('pConf').textContent=d.conf!=null?(d.conf*100).toFixed(0)+'%':'--';
+  document.getElementById('pConf').textContent=d.conf!=null?(d.conf>1?d.conf.toFixed(0):(d.conf*100).toFixed(0))+'%':'--';
   document.getElementById('pSlope').textContent=d.slope!=null?d.slope.toFixed(2):'--';
   if(d.alarm){document.getElementById('alarmSt').textContent='报警!';document.getElementById('alarmSt').style.color='#ff3d71'}
   else{document.getElementById('alarmSt').textContent='无报警';document.getElementById('alarmSt').style.color=''}
@@ -114,8 +115,10 @@ async function fetchPrediction(){
       const labels=chart.data.labels.slice();
       const actual=chart.data.datasets[0].data.slice();
       const pred=new Array(actual.length).fill(null);
-      pp.forEach(p=>{
-        const lbl=new Date(p.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+      const now=new Date();
+      pp.forEach((p,i)=>{
+        const future=new Date(now.getTime()+(i+1)*60000);
+        const lbl=future.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         labels.push(lbl);actual.push(null);pred.push(p.co2);
       });
       chart.data.labels=labels;
@@ -123,7 +126,8 @@ async function fetchPrediction(){
       chart.data.datasets[1].data=pred;
       chart.update('none');
     }
-    if(j.confidence!=null)document.getElementById('pConf').textContent=(j.confidence*100).toFixed(0)+'%';
+    if(j.confidence!=null)document.getElementById('pConf').textContent=(j.confidence>1?j.confidence.toFixed(0):(j.confidence*100).toFixed(0))+'%';
+    if(j.error&&j.error.mae!=null)document.getElementById('pErr').textContent='±'+j.error.mae+'ppm';
     if(j.trend)document.getElementById('pTrend').textContent=j.trend;
   }catch(e){console.warn('predict err',e)}
 }

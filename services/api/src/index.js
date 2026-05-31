@@ -153,8 +153,28 @@ app.get("/api/v1/auth/me", (_req, res) => {
   res.json({ id: "demo-user", name: "刘高朋", email: "demo@cloude.app" });
 });
 
-app.get("/api/v1/realtime/co2", (_req, res) => {
-  if (!latestData) return res.json({ data: null, online: false });
+app.get("/api/v1/realtime/co2", async (_req, res) => {
+  if (!latestData) {
+    const { rows } = await pool.query(
+      "SELECT ts, co2, temperature, humidity, alarm, slope, eta, trend, device FROM readings ORDER BY id DESC LIMIT 1"
+    );
+    const latest = rows[0];
+    if (!latest) return res.json({ data: null, online: false });
+    return res.json({
+      data: {
+        co2: latest.co2,
+        temp: latest.temperature,
+        hum: latest.humidity,
+        alarm: latest.alarm,
+        slope: latest.slope,
+        eta: latest.eta,
+        trend: latest.trend,
+        dev: latest.device,
+        ts: latest.ts,
+      },
+      online: false,
+    });
+  }
   const online = Date.now() - lastHeartbeat < 15000;
   res.json({ data: latestData, online });
 });
@@ -189,6 +209,42 @@ function holtWinters(data, alpha = 0.3, beta = 0.1, horizon = 30) {
     predictions.push(Math.round(level + trend * i));
   }
   return predictions;
+}
+
+function predictionErrorMetrics(minuteData) {
+  if (minuteData.length < 4) {
+    return { mae: null, rmse: null, samples: 0, basis: "rolling_1min_backtest" };
+  }
+  const errors = [];
+  for (let i = 3; i < minuteData.length; i++) {
+    const train = minuteData.slice(0, i);
+    const forecast = holtWinters(train, 0.4, 0.15, 1)[0];
+    if (Number.isFinite(forecast)) {
+      errors.push(forecast - minuteData[i]);
+    }
+  }
+  if (errors.length === 0) {
+    return { mae: null, rmse: null, samples: 0, basis: "rolling_1min_backtest" };
+  }
+  const mae = errors.reduce((sum, error) => sum + Math.abs(error), 0) / errors.length;
+  const rmse = Math.sqrt(errors.reduce((sum, error) => sum + error ** 2, 0) / errors.length);
+  return {
+    mae: Math.round(mae * 10) / 10,
+    rmse: Math.round(rmse * 10) / 10,
+    samples: errors.length,
+    basis: "rolling_1min_backtest"
+  };
+}
+
+function aggregateBySampleWindow(data, windowSize) {
+  const buckets = [];
+  for (let i = 0; i < data.length; i += windowSize) {
+    const slice = data.slice(i, i + windowSize);
+    if (slice.length > 0) {
+      buckets.push(slice.reduce((sum, value) => sum + value, 0) / slice.length);
+    }
+  }
+  return buckets;
 }
 
 // --- Adaptive regression: picks best model (linear vs quadratic) on short window ---
@@ -263,12 +319,36 @@ function pearsonCorr(x, y) {
 // --- CO2 Prediction Endpoint (multi-variable fusion) ---
 app.get("/api/v1/predict/co2", async (_req, res) => {
   try {
-    const { rows } = await pool.query(
+    let dataFreshness = "live_5min";
+    let { rows } = await pool.query(
       "SELECT co2, temperature, humidity FROM readings WHERE ts > NOW() - INTERVAL '5 minutes' ORDER BY ts ASC"
     );
 
     if (rows.length < 10) {
-      return res.json({ error: "Insufficient data", count: rows.length });
+      dataFreshness = "latest_history";
+      const latest = await pool.query(
+        "SELECT co2, temperature, humidity FROM readings ORDER BY id DESC LIMIT 300"
+      );
+      rows = latest.rows.reverse();
+    }
+
+    if (rows.length < 2) {
+      return res.json({
+        current: latestData?.co2 ?? null,
+        filtered: latestData?.co2 ?? null,
+        slope: 0,
+        accel: 0,
+        confidence: 0,
+        trend: "insufficient_data",
+        model: "none",
+        correlation: { co2_temp: 0, co2_hum: 0 },
+        env_factor: 0,
+        error: { mae: null, rmse: null, samples: 0, basis: "rolling_1min_backtest" },
+        prediction: { points: [], eta_warning: null, eta_alarm: null },
+        algorithm: "adaptive_regression + multi_variable_fusion + holt_winters",
+        data_freshness: "insufficient_data",
+        samples: rows.length,
+      });
     }
 
     const co2Data = rows.map((r) => r.co2);
@@ -324,12 +404,14 @@ app.get("/api/v1/predict/co2", async (_req, res) => {
 
     // Holt-Winters prediction on 1-min averages
     const perMin = Math.round(60 / intervalSec);
-    const minuteData = [];
-    for (let i = 0; i < co2Data.length; i += perMin) {
-      const slice = co2Data.slice(i, i + perMin);
-      minuteData.push(slice.reduce((s, v) => s + v, 0) / slice.length);
-    }
+    const minuteData = aggregateBySampleWindow(co2Data, perMin);
     const predictions = holtWinters(minuteData, 0.4, 0.15, 30);
+    const errorRows = await pool.query(
+      "SELECT co2 FROM readings ORDER BY id DESC LIMIT 720"
+    );
+    const errorCo2Data = errorRows.rows.reverse().map((r) => r.co2);
+    const errorMinuteData = aggregateBySampleWindow(errorCo2Data, perMin);
+    const error = predictionErrorMetrics(errorMinuteData);
 
     const points = predictions.map((v, i) => ({ t: `+${i + 1}min`, co2: v }));
 
@@ -352,8 +434,11 @@ app.get("/api/v1/predict/co2", async (_req, res) => {
         co2_hum: Math.round(co2HumCorr * 100) / 100,
       },
       env_factor: envFactor,
+      error,
       prediction: { points, eta_warning: etaWarning, eta_alarm: etaAlarm },
       algorithm: "adaptive_regression + multi_variable_fusion + holt_winters",
+      data_freshness: dataFreshness,
+      samples: rows.length,
     });
   } catch (e) {
     console.error("predict error:", e.message);

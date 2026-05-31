@@ -39,15 +39,16 @@ interface HistoryResponse {
 }
 
 interface PredictResponse {
-  current: number;
-  filtered: number;
-  slope: number;
-  confidence: number;
-  trend: string;
-  model: string;
-  correlation: { co2_temp: number; co2_hum: number };
-  env_factor: number;
-  algorithm: string;
+  current?: number | null;
+  filtered?: number | null;
+  slope?: number;
+  confidence?: number;
+  trend?: string;
+  model?: string;
+  correlation?: { co2_temp: number; co2_hum: number };
+  env_factor?: number;
+  algorithm?: string;
+  error?: { mae: number | null; rmse: number | null; samples: number; basis: string };
   prediction?: { points: { t: string; co2: number }[] };
 }
 
@@ -71,11 +72,31 @@ export default function HomeScreen() {
   const [updatedAt, setUpdatedAt] = useState("--");
   const [co2TempCorr, setCo2TempCorr] = useState(0);
   const [co2HumCorr, setCo2HumCorr] = useState(0);
+  const [predictionMae, setPredictionMae] = useState<number | null>(null);
+  const [predictionRmse, setPredictionRmse] = useState<number | null>(null);
   const [historyPoints, setHistoryPoints] = useState<ChartPoint[]>([]);
   const [predictData, setPredictData] = useState<number[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
+    function loadPrediction() {
+      fetchApi<PredictResponse>("/api/v1/predict/co2")
+        .then((res) => {
+          setTrendLabel(res.trend ?? "--");
+          setModel(res.model ?? "--");
+          setConf(normalizePercent(res.confidence));
+          setEnvFactor(normalizePercent(res.env_factor));
+          setCo2TempCorr(res.correlation?.co2_temp ?? 0);
+          setCo2HumCorr(res.correlation?.co2_hum ?? 0);
+          setPredictionMae(res.error?.mae ?? null);
+          setPredictionRmse(res.error?.rmse ?? null);
+          if (res.prediction?.points) {
+            setPredictData(res.prediction.points.map(p => p.co2));
+          }
+        })
+        .catch(() => {});
+    }
+
     fetchApi<RealtimeResponse>("/api/v1/realtime/co2")
       .then((res) => {
         setCo2(res.data.co2);
@@ -83,8 +104,8 @@ export default function HomeScreen() {
         setHum(res.data.hum);
         setSlope(res.data.slope || 0);
         setEta(res.data.eta ?? -1);
-        setConf(res.data.conf || 0);
-        setEnvFactor(res.data.env || 0);
+        setConf(normalizePercent(res.data.conf));
+        setEnvFactor(normalizePercent(res.data.env));
         setOnline(res.online);
         setDeviceId(res.data.dev || "--");
         setUpdatedAt(res.data.ts || "--");
@@ -104,19 +125,9 @@ export default function HomeScreen() {
       })
       .catch(() => {});
 
-    fetchApi<PredictResponse>("/api/v1/predict/co2")
-      .then((res) => {
-        setTrendLabel(res.trend);
-        setModel(res.model);
-        setConf(res.confidence);
-        setEnvFactor(res.env_factor);
-        setCo2TempCorr(res.correlation.co2_temp);
-        setCo2HumCorr(res.correlation.co2_hum);
-        if (res.prediction?.points) {
-          setPredictData(res.prediction.points.map(p => p.co2));
-        }
-      })
-      .catch(() => {});
+    loadPrediction();
+    const predictionTimer = setInterval(loadPrediction, 60000);
+    return () => clearInterval(predictionTimer);
   }, []);
 
   useEffect(() => {
@@ -126,8 +137,8 @@ export default function HomeScreen() {
       setHum(data.hum);
       setSlope(data.slope || 0);
       setEta(data.eta ?? -1);
-      setConf(data.conf || 0);
-      setEnvFactor(data.env || 0);
+      setConf(normalizePercent(data.conf));
+      setEnvFactor(normalizePercent(data.env));
       setOnline(true);
       setDeviceId(data.dev || "--");
       setUpdatedAt(data.ts || "--");
@@ -206,6 +217,10 @@ export default function HomeScreen() {
           <Metric label="环境因子" value={`${envFactor}%`} />
           <Metric label="趋势" value={trendLabel} />
           <Metric label="模型" value={model} />
+        </View>
+        <View style={styles.grid}>
+          <Metric label="平均误差" value={predictionMae !== null ? `±${predictionMae} ppm` : "--"} />
+          <Metric label="RMSE" value={predictionRmse !== null ? `${predictionRmse} ppm` : "--"} />
         </View>
         <View style={styles.grid}>
           <Metric label="CO2-温度相关" value={`${co2TempCorr}`} />
@@ -320,6 +335,12 @@ function Co2TrendChart({
       </Svg>
     </View>
   );
+}
+
+function normalizePercent(value?: number) {
+  if (!Number.isFinite(value)) return 0;
+  const percent = value! > 1 ? value! : value! * 100;
+  return Math.round(Math.max(0, Math.min(100, percent)));
 }
 
 function downsamplePoints(points: ChartPoint[], maxPoints: number) {
