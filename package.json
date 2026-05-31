@@ -1,6 +1,7 @@
 {
   "name": "cloude-app",
   "private": true,
+  "description": "CO2 monitoring thesis system with mobile app, web dashboard, MQTT API, Docker deployment, prediction analytics, and AstrBot MCP integration.",
   "version": "0.1.0",
   "workspaces": [
     "apps/*",

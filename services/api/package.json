@@ -2,6 +2,7 @@
   "name": "@cloude/api",
   "version": "0.1.0",
   "private": true,
+  "description": "Express CO2 API with MQTT ingestion, PostgreSQL history, WebSocket realtime updates, prediction analytics, and public integration endpoints.",
   "type": "module",
   "scripts": {
     "dev": "node --watch src/index.js",

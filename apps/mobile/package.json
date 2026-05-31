@@ -2,6 +2,7 @@
   "name": "@cloude/mobile",
   "version": "0.1.0",
   "private": true,
+  "description": "Expo Router mobile app for CO2 realtime monitoring, trend prediction, alerts, device status, and MQTT-backed scene control.",
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
