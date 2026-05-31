@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Dimensions, StyleSheet, Text, View } from "react-native";
-// import { LineChart } from "react-native-chart-kit";
+import Svg, { Circle, G, Line, Path, Text as SvgText } from "react-native-svg";
 import { Card } from "@/src/components/Card";
 import { Shell } from "@/src/components/Shell";
 import { connectRealtime, fetchApi, getCo2LevelColor, getCo2LevelLabel, resolveCo2Level } from "@/src/data/api";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
+const CHART_WIDTH = Math.max(280, SCREEN_WIDTH - 96);
+const CHART_HEIGHT = 190;
+const CHART_PAD = { top: 14, right: 12, bottom: 28, left: 42 };
 
 interface RealtimeData {
   co2: number;
@@ -48,6 +51,11 @@ interface PredictResponse {
   prediction?: { points: { t: string; co2: number }[] };
 }
 
+interface ChartPoint {
+  label: string;
+  value: number;
+}
+
 export default function HomeScreen() {
   const [co2, setCo2] = useState(0);
   const [temp, setTemp] = useState(0);
@@ -63,8 +71,7 @@ export default function HomeScreen() {
   const [updatedAt, setUpdatedAt] = useState("--");
   const [co2TempCorr, setCo2TempCorr] = useState(0);
   const [co2HumCorr, setCo2HumCorr] = useState(0);
-  const [historyLabels, setHistoryLabels] = useState<string[]>([]);
-  const [historyData, setHistoryData] = useState<number[]>([]);
+  const [historyPoints, setHistoryPoints] = useState<ChartPoint[]>([]);
   const [predictData, setPredictData] = useState<number[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
 
@@ -87,13 +94,13 @@ export default function HomeScreen() {
     fetchApi<HistoryResponse>("/api/v1/history/co2?range=1h")
       .then((res) => {
         const pts = res.points || [];
-        const labels = pts.map(p => {
+        setHistoryPoints(pts.map((p) => {
           const d = new Date(p.ts);
-          return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
-        });
-        const data = pts.map(p => p.co2);
-        setHistoryLabels(labels);
-        setHistoryData(data);
+          return {
+            label: `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`,
+            value: p.co2
+          };
+        }));
       })
       .catch(() => {});
 
@@ -124,12 +131,24 @@ export default function HomeScreen() {
       setOnline(true);
       setDeviceId(data.dev || "--");
       setUpdatedAt(data.ts || "--");
+      setHistoryPoints((points) => {
+        const d = data.ts ? new Date(data.ts) : new Date();
+        const next = [
+          ...points,
+          {
+            label: `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`,
+            value: data.co2
+          }
+        ];
+        return next.slice(-720);
+      });
     });
     return () => { disconnectRef.current?.(); };
   }, []);
 
   const level = resolveCo2Level(co2);
   const levelColor = getCo2LevelColor(level);
+  const chartPoints = useMemo(() => downsamplePoints(historyPoints, 90), [historyPoints]);
 
   return (
     <Shell title="CO2 监测总览" subtitle="实时浓度、趋势预测与多变量融合分析">
@@ -156,38 +175,14 @@ export default function HomeScreen() {
         <Text style={styles.note}>更新: {updatedAt}</Text>
       </Card>
 
-      {/* 折线图暂时禁用，排查白屏问题
-      {historyData.length > 0 && (
+      {chartPoints.length > 1 && (
         <Card>
           <Text style={styles.sectionTitle}>CO2 趋势曲线</Text>
-          <LineChart
-            data={{
-              labels: historyLabels.filter((_, i) => i % Math.ceil(historyLabels.length / 6) === 0),
-              datasets: [
-                { data: historyData, color: () => "#4fc3f7", strokeWidth: 2 },
-                ...(predictData.length > 0 ? [{
-                  data: [...new Array(historyData.length).fill(0), ...predictData],
-                  color: () => "#ffaa00",
-                  strokeWidth: 2,
-                  withDots: false,
-                }] : []),
-              ],
-            }}
-            width={SCREEN_WIDTH - 64}
-            height={180}
-            yAxisSuffix=" ppm"
-            chartConfig={{
-              backgroundGradientFrom: "#ffffff",
-              backgroundGradientTo: "#ffffff",
-              color: (opacity = 1) => `rgba(79, 195, 247, ${opacity})`,
-              labelColor: () => "#60727b",
-              decimalPlaces: 0,
-              propsForDots: { r: "0" },
-            }}
-            bezier
-            style={{ marginLeft: -16, borderRadius: 8 }}
-            withInnerLines={false}
-            withOuterLines={false}
+          <Co2TrendChart
+            actual={chartPoints}
+            prediction={predictData}
+            width={CHART_WIDTH}
+            height={CHART_HEIGHT}
           />
           <View style={styles.legendRow}>
             <View style={styles.legendItem}>
@@ -203,7 +198,6 @@ export default function HomeScreen() {
           </View>
         </Card>
       )}
-      */}
 
       <Card>
         <Text style={styles.sectionTitle}>多变量融合预测</Text>
@@ -221,6 +215,127 @@ export default function HomeScreen() {
       </Card>
     </Shell>
   );
+}
+
+function Co2TrendChart({
+  actual,
+  prediction,
+  width,
+  height
+}: {
+  actual: ChartPoint[];
+  prediction: number[];
+  width: number;
+  height: number;
+}) {
+  const actualValues = actual.map((point) => point.value);
+  const values = [...actualValues, ...prediction].filter(Number.isFinite);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const yMin = Math.max(0, Math.floor((rawMin - 40) / 50) * 50);
+  const yMax = Math.ceil((rawMax + 40) / 50) * 50;
+  const plotWidth = width - CHART_PAD.left - CHART_PAD.right;
+  const plotHeight = height - CHART_PAD.top - CHART_PAD.bottom;
+  const toX = (index: number, total: number) =>
+    CHART_PAD.left + (total <= 1 ? 0 : (index / (total - 1)) * plotWidth);
+  const toY = (value: number) =>
+    CHART_PAD.top + ((yMax - value) / Math.max(1, yMax - yMin)) * plotHeight;
+  const actualPath = buildPath(actualValues, toX, toY);
+  const predictionPath = buildPath(
+    prediction.length > 0 ? [actualValues[actualValues.length - 1], ...prediction] : [],
+    (index, total) => {
+      const start = CHART_PAD.left + plotWidth * 0.78;
+      const segment = plotWidth * 0.22;
+      return start + (total <= 1 ? 0 : (index / (total - 1)) * segment);
+    },
+    toY
+  );
+  const lastActual = actual[actual.length - 1];
+  const firstLabel = actual[0]?.label ?? "--";
+  const lastLabel = lastActual?.label ?? "--";
+  const ticks = [yMin, Math.round((yMin + yMax) / 2), yMax];
+  const thresholdLines = [1000, 1500].filter((value) => value >= yMin && value <= yMax);
+
+  return (
+    <View style={styles.chartSurface}>
+      <Svg width={width} height={height}>
+        {ticks.map((tick) => {
+          const y = toY(tick);
+          return (
+            <G key={`tick-${tick}`}>
+              <Line
+                x1={CHART_PAD.left}
+                y1={y}
+                x2={width - CHART_PAD.right}
+                y2={y}
+                stroke="#dce7eb"
+                strokeWidth={1}
+              />
+              <SvgText x={8} y={y + 4} fill="#60727b" fontSize={10}>
+                {tick}
+              </SvgText>
+            </G>
+          );
+        })}
+        {thresholdLines.map((threshold) => {
+          const y = toY(threshold);
+          return (
+            <Line
+              key={`threshold-${threshold}`}
+              x1={CHART_PAD.left}
+              y1={y}
+              x2={width - CHART_PAD.right}
+              y2={y}
+              stroke={threshold >= 1500 ? "#ff8a80" : "#ffd180"}
+              strokeWidth={1}
+              strokeDasharray="5 5"
+            />
+          );
+        })}
+        <Path d={actualPath} stroke="#4fc3f7" strokeWidth={3} fill="none" />
+        {predictionPath && (
+          <Path
+            d={predictionPath}
+            stroke="#ffaa00"
+            strokeWidth={3}
+            fill="none"
+            strokeDasharray="6 5"
+          />
+        )}
+        <Circle
+          cx={toX(actualValues.length - 1, actualValues.length)}
+          cy={toY(lastActual.value)}
+          r={4}
+          fill="#4fc3f7"
+        />
+        <SvgText x={CHART_PAD.left} y={height - 8} fill="#60727b" fontSize={10}>
+          {firstLabel}
+        </SvgText>
+        <SvgText x={width - CHART_PAD.right - 36} y={height - 8} fill="#60727b" fontSize={10}>
+          {lastLabel}
+        </SvgText>
+        <SvgText x={width - CHART_PAD.right - 52} y={CHART_PAD.top + 12} fill="#102027" fontSize={11}>
+          {Math.round(lastActual.value)} ppm
+        </SvgText>
+      </Svg>
+    </View>
+  );
+}
+
+function downsamplePoints(points: ChartPoint[], maxPoints: number) {
+  if (points.length <= maxPoints) return points;
+  const stride = Math.ceil(points.length / maxPoints);
+  return points.filter((_, index) => index % stride === 0 || index === points.length - 1);
+}
+
+function buildPath(
+  values: number[],
+  toX: (index: number, total: number) => number,
+  toY: (value: number) => number
+) {
+  return values
+    .map((value, index) => `${index === 0 ? "M" : "L"} ${toX(index, values.length).toFixed(1)} ${toY(value).toFixed(1)}`)
+    .join(" ");
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -320,5 +435,14 @@ const styles = StyleSheet.create({
   legendText: {
     color: "#60727b",
     fontSize: 12
+  },
+  chartSurface: {
+    alignItems: "center",
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "#d9e2e7",
+    borderRadius: 8,
+    backgroundColor: "#f8fbfc",
+    paddingVertical: 4
   }
 });
