@@ -60,10 +60,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="card-value"><span class="trend-arrow" id="trendArrow">—</span></div>
     <div class="card-sub" id="etaText">--</div>
   </div>
+  <div class="card">
+    <div class="card-label">置信度</div>
+    <div class="card-value" id="confVal">--<span style="font-size:0.9rem">%</span></div>
+    <div class="card-sub" id="confLabel">--</div>
+  </div>
+  <div class="card">
+    <div class="card-label">趋势类型</div>
+    <div class="card-value" id="trendType">--</div>
+    <div class="card-sub" id="accelVal">--</div>
+  </div>
 </div>
 <div class="chart-container">
-  <h3>CO2 浓度趋势（最近 1 小时）</h3>
+  <h3>CO2 浓度趋势（最近 1 小时 + 预测 30 分钟）</h3>
   <canvas id="co2Chart" height="200"></canvas>
+</div>
+<div class="chart-container" id="predInfo" style="display:none">
+  <h3>预测详情</h3>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:0.85rem">
+    <div>算法: <span id="predAlgo" style="color:#4fc3f7">--</span></div>
+    <div>预警ETA: <span id="predEtaWarn" style="color:#ffaa00">--</span></div>
+    <div>报警ETA: <span id="predEtaAlarm" style="color:#ff3d71">--</span></div>
+  </div>
 </div>
 <div class="alerts-container">
   <h3>报警记录</h3>
@@ -81,7 +99,10 @@ const API_BASE='';
 let chart;
 function initChart(){
   const ctx=document.getElementById('co2Chart').getContext('2d');
-  chart=new Chart(ctx,{type:'line',data:{labels:[],datasets:[{label:'CO2 (ppm)',data:[],borderColor:'#4fc3f7',backgroundColor:'rgba(79,195,247,0.1)',borderWidth:2,fill:true,tension:0.3,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{display:true,ticks:{color:'#8892b0',maxTicksLimit:6,font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}},y:{display:true,ticks:{color:'#8892b0',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}}},plugins:{legend:{display:false}}}});
+  chart=new Chart(ctx,{type:'line',data:{labels:[],datasets:[
+    {label:'CO2 (ppm)',data:[],borderColor:'#4fc3f7',backgroundColor:'rgba(79,195,247,0.1)',borderWidth:2,fill:true,tension:0.3,pointRadius:0},
+    {label:'预测 (ppm)',data:[],borderColor:'#ffaa00',backgroundColor:'rgba(255,170,0,0.05)',borderWidth:2,borderDash:[6,4],fill:false,tension:0.3,pointRadius:0}
+  ]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{display:true,ticks:{color:'#8892b0',maxTicksLimit:8,font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}},y:{display:true,ticks:{color:'#8892b0',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}}},plugins:{legend:{display:true,labels:{color:'#8892b0',font:{size:11}}}}}});
 }
 function co2Color(v){if(v<1000)return'#00d68f';if(v<=1500)return'#ffaa00';return'#ff3d71'}
 function co2Class(v){if(v<1000)return'status-good';if(v<=1500)return'status-warn';return'status-danger'}
@@ -106,7 +127,23 @@ function updateUI(d,online){
   else if(slope<0){arrow.textContent='↓';arrow.style.color='#00d68f'}
   else{arrow.textContent='→';arrow.style.color='#8892b0'}
   const etaEl=document.getElementById('etaText');
-  etaEl.textContent=eta>0?'预计 '+eta+' 分钟达标':'--';
+  if(eta>0){const m=Math.ceil(eta/60);etaEl.textContent='预计 '+m+' 分钟达预警'}
+  else{etaEl.textContent='--'}
+  // Confidence
+  const conf=d.conf!=null?d.conf:'--';
+  document.getElementById('confVal').innerHTML=conf+'<span style="font-size:0.9rem">%</span>';
+  const confLbl=document.getElementById('confLabel');
+  if(conf>=80)confLbl.textContent='可信';
+  else if(conf>=50)confLbl.textContent='一般';
+  else confLbl.textContent='不确定';
+  // Trend type
+  const trendNames=['稳定','线性上升','加速上升','减速下降'];
+  const trendColors=['#8892b0','#ffaa00','#ff3d71','#00d68f'];
+  const t=d.trend||0;
+  const ttEl=document.getElementById('trendType');
+  ttEl.textContent=trendNames[t]||'稳定';ttEl.style.color=trendColors[t]||'#8892b0';
+  const acEl=document.getElementById('accelVal');
+  acEl.textContent=d.accel!=null?d.accel+' ppm/min²':'--';
   document.getElementById('lastUpdate').textContent=new Date().toLocaleTimeString('zh-CN');
 }
 async function fetchRealtime(){
@@ -115,8 +152,44 @@ async function fetchRealtime(){
 async function fetchHistory(){
   try{const r=await fetch(API_BASE+'/api/v1/history/co2?range=1h');const j=await r.json();
   const pts=j.points||[];
-  chart.data.labels=pts.map(p=>new Date(p.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}));
-  chart.data.datasets[0].data=pts.map(p=>p.co2);chart.update()}catch(e){console.error('history',e)}
+  const labels=pts.map(p=>new Date(p.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}));
+  const data=pts.map(p=>p.co2);
+  chart.data.labels=labels;
+  chart.data.datasets[0].data=data;
+  // Clear prediction data until fetchPrediction fills it
+  chart.data.datasets[1].data=new Array(data.length).fill(null);
+  chart.update();
+  // Fetch prediction to overlay
+  fetchPrediction(labels,data)}catch(e){console.error('history',e)}
+}
+async function fetchPrediction(histLabels,histData){
+  try{const r=await fetch(API_BASE+'/api/v1/predict/co2');const j=await r.json();
+  if(j.error)return;
+  const predPts=j.prediction?.points||[];
+  if(!predPts.length)return;
+  // Extend labels with future time points
+  const allLabels=[...histLabels];
+  const predData=new Array(histData.length).fill(null);
+  // Connect prediction to last real point
+  predData[predData.length-1]=histData[histData.length-1];
+  for(let i=0;i<predPts.length;i++){
+    allLabels.push(predPts[i].t);
+    predData.push(predPts[i].co2);
+  }
+  // Extend real data with nulls for prediction zone
+  const realData=[...histData,...new Array(predPts.length).fill(null)];
+  chart.data.labels=allLabels;
+  chart.data.datasets[0].data=realData;
+  chart.data.datasets[1].data=predData;
+  chart.update();
+  // Update prediction info panel
+  document.getElementById('predInfo').style.display='block';
+  document.getElementById('predAlgo').textContent=j.algorithm||'--';
+  const ew=j.prediction.eta_warning;
+  document.getElementById('predEtaWarn').textContent=ew?Math.ceil(ew/60)+' 分钟':'当前安全';
+  const ea=j.prediction.eta_alarm;
+  document.getElementById('predEtaAlarm').textContent=ea?Math.ceil(ea/60)+' 分钟':'30分钟内安全';
+  }catch(e){console.error('predict',e)}
 }
 async function fetchAlerts(){
   try{const r=await fetch(API_BASE+'/api/v1/alerts');const j=await r.json();

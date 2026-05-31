@@ -172,6 +172,130 @@ app.get("/api/v1/history/co2", async (req, res) => {
   res.json({ range, count: rows.length, points: rows });
 });
 
+// --- Holt-Winters double exponential smoothing ---
+function holtWinters(data, alpha = 0.3, beta = 0.1, horizon = 30) {
+  if (data.length < 2) return [];
+  let level = data[0];
+  let trend = data[1] - data[0];
+
+  for (let i = 1; i < data.length; i++) {
+    const prevLevel = level;
+    level = alpha * data[i] + (1 - alpha) * (level + trend);
+    trend = beta * (level - prevLevel) + (1 - beta) * trend;
+  }
+
+  const predictions = [];
+  for (let i = 1; i <= horizon; i++) {
+    predictions.push(Math.round(level + trend * i));
+  }
+  return predictions;
+}
+
+// --- CO2 Prediction Endpoint ---
+app.get("/api/v1/predict/co2", async (_req, res) => {
+  try {
+    // Fetch last 30 minutes of data (~360 points at 5s interval)
+    const { rows } = await pool.query(
+      "SELECT co2, slope, trend FROM readings WHERE ts > NOW() - INTERVAL '30 minutes' ORDER BY ts ASC"
+    );
+
+    if (rows.length < 10) {
+      return res.json({ error: "Insufficient data", count: rows.length });
+    }
+
+    const co2Data = rows.map((r) => r.co2);
+    const current = co2Data[co2Data.length - 1];
+
+    // EWMA filter for current filtered value
+    let filtered = co2Data[0];
+    const ewmaAlpha = 0.3;
+    for (let i = 1; i < co2Data.length; i++) {
+      filtered = ewmaAlpha * co2Data[i] + (1 - ewmaAlpha) * filtered;
+    }
+    filtered = Math.round(filtered);
+
+    // Quadratic regression on recent data for slope/accel
+    const n = co2Data.length;
+    let sx = 0, sx2 = 0, sx3 = 0, sx4 = 0;
+    let sy = 0, sxy = 0, sx2y = 0;
+    for (let i = 0; i < n; i++) {
+      const x = i, y = co2Data[i];
+      sx += x; sx2 += x * x; sx3 += x * x * x; sx4 += x * x * x * x;
+      sy += y; sxy += x * y; sx2y += x * x * y;
+    }
+    const d = n*(sx2*sx4-sx3*sx3) - sx*(sx*sx4-sx3*sx2) + sx2*(sx*sx3-sx2*sx2);
+    let a = 0, b = 0, c = 0;
+    if (Math.abs(d) > 1e-6) {
+      c = (sy*(sx2*sx4-sx3*sx3)-sx*(sxy*sx4-sx2y*sx3)+sx2*(sxy*sx3-sx2y*sx2))/d;
+      b = (n*(sxy*sx4-sx2y*sx3)-sy*(sx*sx4-sx3*sx2)+sx2*(sx*sx2y-sxy*sx2))/d;
+      a = (n*(sx2*sx2y-sx3*sxy)-sx*(sx*sx2y-sxy*sx2)+sy*(sx*sx3-sx2*sx2))/d;
+    }
+
+    // Derivatives at current point (ppm/min)
+    const intervalSec = 5;
+    const deriv1 = (2 * a * (n - 1) + b) * (60 / intervalSec);
+    const deriv2 = (2 * a) * (3600 / (intervalSec * intervalSec));
+
+    // R-squared
+    let mean = sy / n, ssRes = 0, ssTot = 0;
+    for (let i = 0; i < n; i++) {
+      const yhat = a * i * i + b * i + c;
+      ssRes += (co2Data[i] - yhat) ** 2;
+      ssTot += (co2Data[i] - mean) ** 2;
+    }
+    const r2 = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 1;
+    const confidence = Math.round(r2 * 100);
+
+    // Trend label
+    let trendLabel = "stable";
+    if (deriv1 > 2 && deriv2 > 0.5) trendLabel = "accelerating";
+    else if (deriv1 > 1) trendLabel = "rising";
+    else if (deriv1 < -1) trendLabel = "falling";
+
+    // Holt-Winters prediction (30 min horizon, 1 point/min)
+    // Downsample to 1-min averages first
+    const perMin = Math.round(60 / intervalSec);
+    const minuteData = [];
+    for (let i = 0; i < co2Data.length; i += perMin) {
+      const slice = co2Data.slice(i, i + perMin);
+      minuteData.push(slice.reduce((s, v) => s + v, 0) / slice.length);
+    }
+    const predictions = holtWinters(minuteData, 0.3, 0.1, 30);
+
+    const points = predictions.map((v, i) => ({
+      t: `+${i + 1}min`,
+      co2: v,
+    }));
+
+    // ETA to thresholds
+    let etaWarning = null, etaAlarm = null;
+    for (let i = 0; i < predictions.length; i++) {
+      if (etaWarning === null && predictions[i] >= 1000)
+        etaWarning = (i + 1) * 60;
+      if (etaAlarm === null && predictions[i] >= 1500)
+        etaAlarm = (i + 1) * 60;
+    }
+
+    res.json({
+      current,
+      filtered,
+      slope: Math.round(deriv1 * 10) / 10,
+      accel: Math.round(deriv2 * 10) / 10,
+      confidence,
+      trend: trendLabel,
+      prediction: {
+        points,
+        eta_warning: etaWarning,
+        eta_alarm: etaAlarm,
+      },
+      algorithm: "quadratic_regression + holt_winters",
+    });
+  } catch (e) {
+    console.error("predict error:", e.message);
+    res.status(500).json({ error: "Prediction failed" });
+  }
+});
+
 app.get("/api/v1/devices", (_req, res) => {
   const online = Date.now() - lastHeartbeat < 15000;
   res.json({ items: [
