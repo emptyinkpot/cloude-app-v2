@@ -10,5 +10,14 @@
     "dev:mobile": "npm --workspace apps/mobile run start",
     "dev:api": "npm --workspace services/api run dev",
     "lint": "npm --workspace services/api run lint"
+  },
+  "devDependencies": {
+    "expo-router": "~6.0.24",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-native": "^0.81.5"
+  },
+  "overrides": {
+    "react-native-screens": "4.16.0"
   }
 }

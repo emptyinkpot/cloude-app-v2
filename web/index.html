@@ -2,217 +2,178 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CO2 监测仪表盘</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CO2 Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh;padding:16px}
-.header{text-align:center;margin-bottom:20px}
-.header h1{font-size:1.4rem;color:#8892b0;font-weight:400}
-.co2-main{text-align:center;padding:30px 20px;background:#16213e;border-radius:16px;margin-bottom:16px}
-.co2-value{font-size:4.5rem;font-weight:700;line-height:1.1}
-.co2-unit{font-size:1.2rem;color:#8892b0;margin-top:4px}
-.co2-status{font-size:1rem;margin-top:8px;font-weight:500}
-.status-good{color:#00d68f}.status-warn{color:#ffaa00}.status-danger{color:#ff3d71}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
-.card{background:#16213e;border-radius:12px;padding:16px;text-align:center}
-.card-label{font-size:0.8rem;color:#8892b0;margin-bottom:6px}
-.card-value{font-size:1.8rem;font-weight:600}
-.card-sub{font-size:0.75rem;color:#8892b0;margin-top:4px}
-.device-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
-.dot-online{background:#00d68f;box-shadow:0 0 6px #00d68f}.dot-offline{background:#ff3d71}
-.chart-container{background:#16213e;border-radius:12px;padding:16px;margin-bottom:16px}
-.chart-container h3{font-size:0.9rem;color:#8892b0;margin-bottom:10px}
-.alerts-container{background:#16213e;border-radius:12px;padding:16px;margin-bottom:16px}
-.alerts-container h3{font-size:0.9rem;color:#8892b0;margin-bottom:10px}
-.alert-item{padding:8px 10px;border-left:3px solid #ffaa00;margin-bottom:8px;background:#1a1a2e;border-radius:0 8px 8px 0;font-size:0.8rem}
-.alert-item.level-critical{border-left-color:#ff3d71}
-.alert-time{color:#8892b0;font-size:0.7rem}
-.footer{background:#16213e;border-radius:12px;padding:12px 16px;font-size:0.75rem;color:#8892b0}
-.footer-row{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
-.trend-arrow{font-size:1.2rem}
-@media(max-width:480px){.co2-value{font-size:3rem}.grid{grid-template-columns:repeat(2,1fr)}}
+body{height:100vh;overflow:hidden;display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f1a;color:#e0e0e0}
+.top{height:48px;display:flex;align-items:center;padding:0 12px;gap:10px;background:#1a1a2e;border-bottom:1px solid #2a2a3e;flex-shrink:0}
+.co2-box{display:flex;align-items:baseline;gap:6px}
+.co2-val{font-size:28px;font-weight:700;color:#00d68f;line-height:1}
+.co2-unit{font-size:12px;color:#888}
+.co2-status{font-size:11px;padding:2px 6px;border-radius:3px;background:#00d68f22;color:#00d68f;margin-left:4px}
+.online-dot{width:8px;height:8px;border-radius:50%;background:#00d68f;margin-left:6px;flex-shrink:0}
+.online-dot.off{background:#ff3d71}
+.pills{display:flex;gap:6px;margin-left:auto}
+.pill{background:#1e1e32;border:1px solid #2a2a3e;border-radius:4px;padding:2px 8px;font-size:11px;white-space:nowrap}
+.pill b{color:#00d68f;margin-right:3px}
+.chart-wrap{flex:1;position:relative;min-height:0}
+.chart-wrap canvas{position:absolute;top:0;left:0;width:100%!important;height:100%!important}
+.foot{height:20px;display:flex;align-items:center;padding:0 12px;gap:14px;font-size:10px;color:#666;background:#1a1a2e;border-top:1px solid #2a2a3e;flex-shrink:0}
+.foot .ok{color:#00d68f}.foot .err{color:#ff3d71}
 </style>
 </head>
 <body>
-<div class="header"><h1>CO2 室内空气监测</h1></div>
-<div class="co2-main">
-  <div class="co2-value" id="co2Val">--</div>
-  <div class="co2-unit">ppm</div>
-  <div class="co2-status" id="co2Status">等待数据...</div>
-</div>
-<div class="grid">
-  <div class="card">
-    <div class="card-label">设备状态</div>
-    <div class="card-value"><span class="device-dot dot-offline" id="devDot"></span><span id="devText">离线</span></div>
+<div class="top">
+  <div class="co2-box">
+    <span class="co2-val" id="co2v">--</span>
+    <span class="co2-unit">ppm</span>
+    <span class="co2-status" id="co2s">--</span>
+    <span class="online-dot" id="onlineDot"></span>
   </div>
-  <div class="card">
-    <div class="card-label">温度</div>
-    <div class="card-value" id="tempVal">--<span style="font-size:0.9rem">°C</span></div>
-  </div>
-  <div class="card">
-    <div class="card-label">湿度</div>
-    <div class="card-value" id="humVal">--<span style="font-size:0.9rem">%</span></div>
-  </div>
-  <div class="card">
-    <div class="card-label">趋势预测</div>
-    <div class="card-value"><span class="trend-arrow" id="trendArrow">—</span></div>
-    <div class="card-sub" id="etaText">--</div>
-  </div>
-  <div class="card">
-    <div class="card-label">置信度</div>
-    <div class="card-value" id="confVal">--<span style="font-size:0.9rem">%</span></div>
-    <div class="card-sub" id="confLabel">--</div>
-  </div>
-  <div class="card">
-    <div class="card-label">趋势类型</div>
-    <div class="card-value" id="trendType">--</div>
-    <div class="card-sub" id="accelVal">--</div>
+  <div class="pills">
+    <div class="pill"><b id="pTemp">--</b>&deg;C</div>
+    <div class="pill"><b id="pHum">--</b>%</div>
+    <div class="pill"><b id="pTrend">--</b></div>
+    <div class="pill">conf <b id="pConf">--</b></div>
+    <div class="pill">slope <b id="pSlope">--</b></div>
   </div>
 </div>
-<div class="chart-container">
-  <h3>CO2 浓度趋势（最近 1 小时 + 预测 30 分钟）</h3>
-  <canvas id="co2Chart" height="200"></canvas>
-</div>
-<div class="chart-container" id="predInfo" style="display:none">
-  <h3>预测详情</h3>
-  <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:0.85rem">
-    <div>算法: <span id="predAlgo" style="color:#4fc3f7">--</span></div>
-    <div>预警ETA: <span id="predEtaWarn" style="color:#ffaa00">--</span></div>
-    <div>报警ETA: <span id="predEtaAlarm" style="color:#ff3d71">--</span></div>
-  </div>
-</div>
-<div class="alerts-container">
-  <h3>报警记录</h3>
-  <div id="alertList"><div class="alert-item">暂无报警记录</div></div>
-</div>
-<div class="footer">
-  <div class="footer-row">
-    <span>MQTT: <span id="mqttStatus">--</span></span>
-    <span>心跳: <span id="lastHb">--</span></span>
-    <span>刷新: <span id="lastUpdate">--</span></span>
-  </div>
+<div class="chart-wrap"><canvas id="c"></canvas></div>
+<div class="foot">
+  <span>MQTT: <span id="mqSt">--</span></span>
+  <span>心跳: <span id="hbSt">--</span></span>
+  <span id="alarmSt">无报警</span>
+  <span id="updSt">--</span>
 </div>
 <script>
-const API_BASE='';
-let chart;
+'use strict';
+const API='';
+let chart,ws,wsRetry=0;
+
+function co2Color(v){return v>1500?'#ff3d71':v>1000?'#ffaa00':'#00d68f'}
+
 function initChart(){
-  const ctx=document.getElementById('co2Chart').getContext('2d');
+  const ctx=document.getElementById('c').getContext('2d');
   chart=new Chart(ctx,{type:'line',data:{labels:[],datasets:[
-    {label:'CO2 (ppm)',data:[],borderColor:'#4fc3f7',backgroundColor:'rgba(79,195,247,0.1)',borderWidth:2,fill:true,tension:0.3,pointRadius:0},
-    {label:'预测 (ppm)',data:[],borderColor:'#ffaa00',backgroundColor:'rgba(255,170,0,0.05)',borderWidth:2,borderDash:[6,4],fill:false,tension:0.3,pointRadius:0}
-  ]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{display:true,ticks:{color:'#8892b0',maxTicksLimit:8,font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}},y:{display:true,ticks:{color:'#8892b0',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'}}},plugins:{legend:{display:true,labels:{color:'#8892b0',font:{size:11}}}}}});
+    {label:'CO2 实际',data:[],borderColor:'#4fc3f7',backgroundColor:'rgba(79,195,247,0.05)',borderWidth:1.5,fill:true,tension:0.3,pointRadius:0},
+    {label:'CO2 预测',data:[],borderColor:'#ffaa00',borderWidth:1.5,borderDash:[5,3],fill:false,tension:0.3,pointRadius:0}
+  ]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:300},
+    interaction:{intersect:false,mode:'index'},
+    scales:{x:{ticks:{color:'#555',maxTicksLimit:8,font:{size:9}},grid:{color:'rgba(255,255,255,0.04)'}},
+            y:{ticks:{color:'#555',font:{size:9}},grid:{color:'rgba(255,255,255,0.04)'}}},
+    plugins:{legend:{labels:{color:'#888',font:{size:9},boxWidth:12,padding:6}}}}});
 }
-function co2Color(v){if(v<1000)return'#00d68f';if(v<=1500)return'#ffaa00';return'#ff3d71'}
-function co2Class(v){if(v<1000)return'status-good';if(v<=1500)return'status-warn';return'status-danger'}
-function co2Label(v){if(v<1000)return'空气质量良好';if(v<=1500)return'注意通风';return'浓度过高！请立即通风'}
-</script>
-<script>
+
 function updateUI(d,online){
-  const co2=d.co2||0;
-  document.getElementById('co2Val').textContent=co2;
-  document.getElementById('co2Val').style.color=co2Color(co2);
-  const st=document.getElementById('co2Status');
-  st.textContent=co2Label(co2);st.className='co2-status '+co2Class(co2);
-  document.getElementById('tempVal').innerHTML=(d.temp||'--')+'<span style="font-size:0.9rem">°C</span>';
-  document.getElementById('humVal').innerHTML=(d.hum||'--')+'<span style="font-size:0.9rem">%</span>';
-  const dot=document.getElementById('devDot');
-  const dtx=document.getElementById('devText');
-  if(online){dot.className='device-dot dot-online';dtx.textContent='在线'}
-  else{dot.className='device-dot dot-offline';dtx.textContent='离线'}
-  const slope=d.slope||0;const eta=d.eta||-1;
-  const arrow=document.getElementById('trendArrow');
-  if(slope>0){arrow.textContent='↑';arrow.style.color='#ff3d71'}
-  else if(slope<0){arrow.textContent='↓';arrow.style.color='#00d68f'}
-  else{arrow.textContent='→';arrow.style.color='#8892b0'}
-  const etaEl=document.getElementById('etaText');
-  if(eta>0){const m=Math.ceil(eta/60);etaEl.textContent='预计 '+m+' 分钟达预警'}
-  else{etaEl.textContent='--'}
-  // Confidence
-  const conf=d.conf!=null?d.conf:'--';
-  document.getElementById('confVal').innerHTML=conf+'<span style="font-size:0.9rem">%</span>';
-  const confLbl=document.getElementById('confLabel');
-  if(conf>=80)confLbl.textContent='可信';
-  else if(conf>=50)confLbl.textContent='一般';
-  else confLbl.textContent='不确定';
-  // Trend type
-  const trendNames=['稳定','线性上升','加速上升','减速下降'];
-  const trendColors=['#8892b0','#ffaa00','#ff3d71','#00d68f'];
-  const t=d.trend||0;
-  const ttEl=document.getElementById('trendType');
-  ttEl.textContent=trendNames[t]||'稳定';ttEl.style.color=trendColors[t]||'#8892b0';
-  const acEl=document.getElementById('accelVal');
-  acEl.textContent=d.accel!=null?d.accel+' ppm/min²':'--';
-  document.getElementById('lastUpdate').textContent=new Date().toLocaleTimeString('zh-CN');
+  const co2=d.co2||d.filt||0;
+  const el=document.getElementById('co2v');
+  el.textContent=Math.round(co2);
+  el.style.color=co2Color(co2);
+  const s=document.getElementById('co2s');
+  if(co2>1500){s.textContent='危险';s.style.color='#ff3d71';s.style.background='#ff3d7122'}
+  else if(co2>1000){s.textContent='偏高';s.style.color='#ffaa00';s.style.background='#ffaa0022'}
+  else{s.textContent='正常';s.style.color='#00d68f';s.style.background='#00d68f22'}
+  const dot=document.getElementById('onlineDot');
+  dot.className='online-dot'+(online?'':' off');
+  document.getElementById('pTemp').textContent=d.temp!=null?d.temp.toFixed(1):'--';
+  document.getElementById('pHum').textContent=d.hum!=null?d.hum.toFixed(0):'--';
+  document.getElementById('pTrend').textContent=d.trend||'--';
+  document.getElementById('pConf').textContent=d.conf!=null?(d.conf*100).toFixed(0)+'%':'--';
+  document.getElementById('pSlope').textContent=d.slope!=null?d.slope.toFixed(2):'--';
+  if(d.alarm){document.getElementById('alarmSt').textContent='报警!';document.getElementById('alarmSt').style.color='#ff3d71'}
+  else{document.getElementById('alarmSt').textContent='无报警';document.getElementById('alarmSt').style.color=''}
+  document.getElementById('updSt').textContent='更新: '+new Date().toLocaleTimeString();
 }
 async function fetchRealtime(){
-  try{const r=await fetch(API_BASE+'/api/v1/realtime/co2');const j=await r.json();updateUI(j.data,j.online)}catch(e){console.error('realtime',e)}
+  try{
+    const r=await fetch(API+'/api/v1/realtime/co2');
+    const j=await r.json();
+    updateUI(j.data,j.online!==false);
+  }catch(e){console.warn('realtime err',e)}
 }
+
 async function fetchHistory(){
-  try{const r=await fetch(API_BASE+'/api/v1/history/co2?range=1h');const j=await r.json();
-  const pts=j.points||[];
-  const labels=pts.map(p=>new Date(p.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}));
-  const data=pts.map(p=>p.co2);
-  chart.data.labels=labels;
-  chart.data.datasets[0].data=data;
-  // Clear prediction data until fetchPrediction fills it
-  chart.data.datasets[1].data=new Array(data.length).fill(null);
-  chart.update();
-  // Fetch prediction to overlay
-  fetchPrediction(labels,data)}catch(e){console.error('history',e)}
+  try{
+    const r=await fetch(API+'/api/v1/history/co2?range=1h');
+    const j=await r.json();
+    const pts=j.points||[];
+    chart.data.labels=pts.map(p=>new Date(p.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
+    chart.data.datasets[0].data=pts.map(p=>p.co2);
+    chart.update('none');
+  }catch(e){console.warn('history err',e)}
 }
-async function fetchPrediction(histLabels,histData){
-  try{const r=await fetch(API_BASE+'/api/v1/predict/co2');const j=await r.json();
-  if(j.error)return;
-  const predPts=j.prediction?.points||[];
-  if(!predPts.length)return;
-  // Extend labels with future time points
-  const allLabels=[...histLabels];
-  const predData=new Array(histData.length).fill(null);
-  // Connect prediction to last real point
-  predData[predData.length-1]=histData[histData.length-1];
-  for(let i=0;i<predPts.length;i++){
-    allLabels.push(predPts[i].t);
-    predData.push(predPts[i].co2);
-  }
-  // Extend real data with nulls for prediction zone
-  const realData=[...histData,...new Array(predPts.length).fill(null)];
-  chart.data.labels=allLabels;
-  chart.data.datasets[0].data=realData;
-  chart.data.datasets[1].data=predData;
-  chart.update();
-  // Update prediction info panel
-  document.getElementById('predInfo').style.display='block';
-  document.getElementById('predAlgo').textContent=j.algorithm||'--';
-  const ew=j.prediction.eta_warning;
-  document.getElementById('predEtaWarn').textContent=ew?Math.ceil(ew/60)+' 分钟':'当前安全';
-  const ea=j.prediction.eta_alarm;
-  document.getElementById('predEtaAlarm').textContent=ea?Math.ceil(ea/60)+' 分钟':'30分钟内安全';
-  }catch(e){console.error('predict',e)}
+
+async function fetchPrediction(){
+  try{
+    const r=await fetch(API+'/api/v1/predict/co2');
+    const j=await r.json();
+    if(j.prediction&&j.prediction.points){
+      const pp=j.prediction.points;
+      const labels=chart.data.labels.slice();
+      const actual=chart.data.datasets[0].data.slice();
+      const pred=new Array(actual.length).fill(null);
+      pp.forEach(p=>{
+        const lbl=new Date(p.t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+        labels.push(lbl);actual.push(null);pred.push(p.co2);
+      });
+      chart.data.labels=labels;
+      chart.data.datasets[0].data=actual;
+      chart.data.datasets[1].data=pred;
+      chart.update('none');
+    }
+    if(j.confidence!=null)document.getElementById('pConf').textContent=(j.confidence*100).toFixed(0)+'%';
+    if(j.trend)document.getElementById('pTrend').textContent=j.trend;
+  }catch(e){console.warn('predict err',e)}
 }
-async function fetchAlerts(){
-  try{const r=await fetch(API_BASE+'/api/v1/alerts');const j=await r.json();
-  const items=(j.items||[]).slice(0,10);const el=document.getElementById('alertList');
-  if(!items.length){el.innerHTML='<div class="alert-item">暂无报警记录</div>';return}
-  el.innerHTML=items.map(a=>'<div class="alert-item'+(a.level==='critical'?' level-critical':'')+'"><span class="alert-time">'+new Date(a.ts).toLocaleString('zh-CN')+'</span> '+a.message+' ('+a.co2+' ppm)</div>').join('')}catch(e){console.error('alerts',e)}
-}
+
 async function fetchHealth(){
-  try{const r=await fetch(API_BASE+'/api/v1/health');const j=await r.json();
-  document.getElementById('mqttStatus').textContent=j.mqtt?'已连接':'断开';
-  document.getElementById('mqttStatus').style.color=j.mqtt?'#00d68f':'#ff3d71';
-  if(j.lastHeartbeat)document.getElementById('lastHb').textContent=new Date(j.lastHeartbeat).toLocaleTimeString('zh-CN')}catch(e){console.error('health',e)}
+  try{
+    const r=await fetch(API+'/api/v1/health');
+    const j=await r.json();
+    const mq=document.getElementById('mqSt');
+    mq.textContent=j.mqtt?'在线':'离线';
+    mq.className=j.mqtt?'ok':'err';
+    if(j.lastHeartbeat){
+      const ago=Math.round((Date.now()-j.lastHeartbeat)/1000);
+      document.getElementById('hbSt').textContent=ago+'s前';
+    }
+  }catch(e){document.getElementById('mqSt').textContent='错误';document.getElementById('mqSt').className='err'}
 }
 function connectWS(){
   const proto=location.protocol==='https:'?'wss:':'ws:';
-  const ws=new WebSocket(proto+'//'+location.host+'/ws/realtime');
-  ws.onmessage=function(ev){try{const msg=JSON.parse(ev.data);if(msg.type==='realtime')updateUI(msg.data,true)}catch(e){}};
-  ws.onclose=function(){setTimeout(connectWS,5000)};
-  ws.onerror=function(){ws.close()};
+  const url=proto+'//'+location.host+'/ws/realtime';
+  try{
+    ws=new WebSocket(url);
+    ws.onopen=()=>{wsRetry=0;console.log('WS connected')};
+    ws.onmessage=(ev)=>{
+      try{
+        const msg=JSON.parse(ev.data);
+        if(msg.type==='realtime'&&msg.data)updateUI(msg.data,true);
+      }catch(e){}
+    };
+    ws.onclose=()=>{
+      const delay=Math.min(1000*Math.pow(2,wsRetry),30000);
+      wsRetry++;
+      setTimeout(connectWS,delay);
+    };
+    ws.onerror=()=>{ws.close()};
+  }catch(e){setTimeout(connectWS,5000)}
 }
-initChart();fetchRealtime();fetchHistory();fetchAlerts();fetchHealth();
-setInterval(fetchRealtime,5000);setInterval(fetchHistory,60000);setInterval(fetchAlerts,30000);setInterval(fetchHealth,15000);
-connectWS();
+
+(function boot(){
+  initChart();
+  fetchRealtime();
+  fetchHistory();
+  fetchPrediction();
+  fetchHealth();
+  connectWS();
+  setInterval(fetchRealtime,5000);
+  setInterval(fetchHistory,60000);
+  setInterval(fetchHealth,15000);
+  setInterval(fetchPrediction,60000);
+})();
 </script>
 </body>
 </html>

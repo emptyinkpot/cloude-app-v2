@@ -10,6 +10,9 @@
     ],
     "experiments": {
       "typedRoutes": false
+    },
+    "android": {
+      "package": "com.anonymous.cloudeapp"
     }
   }
 }

@@ -13,11 +13,11 @@ export default function TabsLayout() {
         }
       }}
     >
-      <Tabs.Screen name="home" options={{ title: "Home" }} />
-      <Tabs.Screen name="analytics" options={{ title: "Analytics" }} />
-      <Tabs.Screen name="devices" options={{ title: "Devices" }} />
-      <Tabs.Screen name="scenes" options={{ title: "Scenes" }} />
-      <Tabs.Screen name="profile" options={{ title: "Profile" }} />
+      <Tabs.Screen name="home" options={{ title: "监测" }} />
+      <Tabs.Screen name="analytics" options={{ title: "分析" }} />
+      <Tabs.Screen name="devices" options={{ title: "设备" }} />
+      <Tabs.Screen name="scenes" options={{ title: "控制" }} />
+      <Tabs.Screen name="profile" options={{ title: "系统" }} />
     </Tabs>
   );
 }

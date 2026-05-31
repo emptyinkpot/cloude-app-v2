@@ -10,3 +10,6 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-lock.yaml
 package-lock.json
+services/api/*.db
+services/api/*.db-shm
+services/api/*.db-wal
