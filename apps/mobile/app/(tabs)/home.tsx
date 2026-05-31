@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Dimensions, StyleSheet, Text, View } from "react-native";
 import Svg, { Circle, G, Line, Path, Text as SvgText } from "react-native-svg";
 import { Card } from "@/src/components/Card";
@@ -83,26 +83,35 @@ export default function HomeScreen() {
   const [historyPoints, setHistoryPoints] = useState<ChartPoint[]>([]);
   const [predictData, setPredictData] = useState<PredictionPoint[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
+  const predictionLoadingRef = useRef(false);
+  const lastPredictionRequestRef = useRef(0);
+
+  const loadPrediction = useCallback((force = false) => {
+    const now = Date.now();
+    if (!force && now - lastPredictionRequestRef.current < 4500) return;
+    if (predictionLoadingRef.current) return;
+    predictionLoadingRef.current = true;
+    lastPredictionRequestRef.current = now;
+
+    fetchApi<PredictResponse>("/api/v1/predict/co2")
+      .then((res) => {
+        setTrendLabel(res.trend ?? "--");
+        setModel(res.model ?? "--");
+        setConf(normalizePercent(res.confidence));
+        setEnvFactor(normalizePercent(res.env_factor));
+        setCo2TempCorr(res.correlation?.co2_temp ?? 0);
+        setCo2HumCorr(res.correlation?.co2_hum ?? 0);
+        setPredictionMae(res.error?.mae ?? null);
+        setPredictionRmse(res.error?.rmse ?? null);
+        setPredictData(res.prediction?.points ?? []);
+      })
+      .catch(() => {})
+      .finally(() => {
+        predictionLoadingRef.current = false;
+      });
+  }, []);
 
   useEffect(() => {
-    function loadPrediction() {
-      fetchApi<PredictResponse>("/api/v1/predict/co2")
-        .then((res) => {
-          setTrendLabel(res.trend ?? "--");
-          setModel(res.model ?? "--");
-          setConf(normalizePercent(res.confidence));
-          setEnvFactor(normalizePercent(res.env_factor));
-          setCo2TempCorr(res.correlation?.co2_temp ?? 0);
-          setCo2HumCorr(res.correlation?.co2_hum ?? 0);
-          setPredictionMae(res.error?.mae ?? null);
-          setPredictionRmse(res.error?.rmse ?? null);
-          if (res.prediction?.points) {
-            setPredictData(res.prediction.points);
-          }
-        })
-        .catch(() => {});
-    }
-
     fetchApi<RealtimeResponse>("/api/v1/realtime/co2")
       .then((res) => {
         setCo2(res.data.co2);
@@ -115,6 +124,7 @@ export default function HomeScreen() {
         setOnline(res.online);
         setDeviceId(res.data.dev || "--");
         setUpdatedAt(res.data.ts || "--");
+        loadPrediction(true);
       })
       .catch(() => {});
 
@@ -132,10 +142,10 @@ export default function HomeScreen() {
       })
       .catch(() => {});
 
-    loadPrediction();
-    const predictionTimer = setInterval(loadPrediction, 60000);
+    loadPrediction(true);
+    const predictionTimer = setInterval(() => loadPrediction(true), 30000);
     return () => clearInterval(predictionTimer);
-  }, []);
+  }, [loadPrediction]);
 
   useEffect(() => {
     disconnectRef.current = connectRealtime((data: RealtimeData) => {
@@ -149,6 +159,7 @@ export default function HomeScreen() {
       setOnline(true);
       setDeviceId(data.dev || "--");
       setUpdatedAt(data.ts || "--");
+      loadPrediction();
       setHistoryPoints((points) => {
         const d = data.ts ? new Date(data.ts) : new Date();
         const next = [
@@ -163,7 +174,7 @@ export default function HomeScreen() {
       });
     });
     return () => { disconnectRef.current?.(); };
-  }, []);
+  }, [loadPrediction]);
 
   const level = resolveCo2Level(co2);
   const levelColor = getCo2LevelColor(level);
@@ -252,7 +263,11 @@ function Co2TrendChart({
   height: number;
 }) {
   const actualValues = actual.map((point) => point.value);
-  const predictionValues = prediction.map((point) => point.co2);
+  const latestActualValue = actualValues[actualValues.length - 1];
+  const predictionOffset = prediction.length > 0
+    ? latestActualValue - prediction[0].co2
+    : 0;
+  const predictionValues = prediction.map((point) => point.co2 + predictionOffset);
   const values = [...actualValues, ...predictionValues].filter(Number.isFinite);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
@@ -261,40 +276,32 @@ function Co2TrendChart({
   const plotWidth = width - CHART_PAD.left - CHART_PAD.right;
   const plotHeight = height - CHART_PAD.top - CHART_PAD.bottom;
   const hasPrediction = prediction.length > 0;
-  const firstActualTime = actual[0]?.time ?? Date.now();
-  const lastActualTime = actual[actual.length - 1]?.time ?? firstActualTime;
-  const predictionLeadMs = hasPrediction
-    ? Math.max(...prediction.map((point) => parsePredictionLeadMs(point.t)))
-    : 0;
-  const timelineStart = firstActualTime;
-  const timelineEnd = Math.max(lastActualTime + predictionLeadMs, lastActualTime + 1);
-  const toTimelineX = (time: number) =>
-    CHART_PAD.left + ((time - timelineStart) / Math.max(1, timelineEnd - timelineStart)) * plotWidth;
+  const actualStartX = CHART_PAD.left;
+  const actualEndX = hasPrediction
+    ? CHART_PAD.left + plotWidth * 0.78
+    : CHART_PAD.left + plotWidth;
+  const predictionEndX = CHART_PAD.left + plotWidth;
+  const toActualX = (index: number, total: number) =>
+    actualStartX + (total <= 1 ? 0 : (index / (total - 1)) * (actualEndX - actualStartX));
+  const toPredictionX = (index: number, total: number) =>
+    actualEndX + (total <= 1 ? 0 : (index / (total - 1)) * (predictionEndX - actualEndX));
   const toY = (value: number) =>
     CHART_PAD.top + ((yMax - value) / Math.max(1, yMax - yMin)) * plotHeight;
   const actualPath = buildPath(
     actualValues,
-    (index) => toTimelineX(actual[index].time),
+    (index) => toActualX(index, actualValues.length),
     toY
   );
-  const predictionSeries = hasPrediction
-    ? [
-        { value: actualValues[actualValues.length - 1], time: lastActualTime },
-        ...prediction.map((point) => ({
-          value: point.co2,
-          time: lastActualTime + parsePredictionLeadMs(point.t)
-        }))
-      ]
-    : [];
+  const predictionSeries = hasPrediction ? predictionValues : [];
   const predictionPath = buildPath(
-    predictionSeries.map((point) => point.value),
-    (index) => toTimelineX(predictionSeries[index].time),
+    predictionSeries,
+    (index) => toPredictionX(index + 1, predictionSeries.length + 1),
     toY
   );
   const lastActual = actual[actual.length - 1];
   const firstLabel = actual[0]?.label ?? "--";
   const lastLabel = lastActual?.label ?? "--";
-  const lastActualX = toTimelineX(lastActualTime);
+  const lastActualX = actualEndX;
   const lastLabelX = hasPrediction
     ? Math.min(Math.max(CHART_PAD.left, lastActualX - 20), width - CHART_PAD.right - 38)
     : width - CHART_PAD.right - 36;
@@ -340,9 +347,9 @@ function Co2TrendChart({
         <Path d={actualPath} stroke="#4fc3f7" strokeWidth={3} fill="none" />
         {predictionPath && (
           <Path
-            d={predictionPath}
+            d={`M ${lastActualX.toFixed(1)} ${toY(lastActual.value).toFixed(1)} ${predictionPath.replace(/^M\s+/, "L ")}`}
             stroke="#ffaa00"
-            strokeWidth={3}
+            strokeWidth={4}
             fill="none"
             strokeDasharray="6 5"
           />
@@ -350,8 +357,8 @@ function Co2TrendChart({
         <Circle
           cx={lastActualX}
           cy={toY(lastActual.value)}
-          r={4}
-          fill="#4fc3f7"
+          r={5}
+          fill={hasPrediction ? "#ffaa00" : "#4fc3f7"}
         />
         <SvgText x={CHART_PAD.left} y={height - 8} fill="#60727b" fontSize={10}>
           {firstLabel}
@@ -382,14 +389,6 @@ function downsamplePoints(points: ChartPoint[], maxPoints: number) {
   if (points.length <= maxPoints) return points;
   const stride = Math.ceil(points.length / maxPoints);
   return points.filter((_, index) => index % stride === 0 || index === points.length - 1);
-}
-
-function parsePredictionLeadMs(label: string) {
-  const match = /^\+(\d+)\s*(min|m|s)?$/i.exec(label.trim());
-  if (!match) return 0;
-  const value = Number(match[1]);
-  const unit = match[2]?.toLowerCase();
-  return unit === "s" ? value * 1000 : value * 60 * 1000;
 }
 
 function buildPath(
