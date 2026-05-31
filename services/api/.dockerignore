@@ -1,0 +1,4 @@
+node_modules
+co2_data.db
+*.log
+.env

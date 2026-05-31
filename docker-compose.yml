@@ -1,0 +1,58 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./services/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: co2_data
+      POSTGRES_USER: co2api
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-co2secret2026}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U co2api -d co2_data"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  co2-api:
+    build: ./services/api
+    ports:
+      - "3100:3100"
+    environment:
+      PORT: 3100
+      MQTT_BROKER: mqtt://mosquitto:1883
+      MQTT_USER: ${MQTT_USER:-b1362cdd5724c3f1b42f34fb10d921ee}
+      MQTT_PASS: ${MQTT_PASS:-youmeng2022}
+      MQTT_TOPIC: /iot/2139/stm32
+      MQTT_CONTROL_TOPIC: /iot/2139/wx
+      DATABASE_URL: postgres://co2api:${DB_PASSWORD:-co2secret2026}@postgres:5432/co2_data
+      API_KEY: ${API_KEY:-co2-demo-key-2026}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - co2-api
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  mosquitto_data:

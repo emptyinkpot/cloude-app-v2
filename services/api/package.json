@@ -9,10 +9,10 @@
     "lint": "node --check src/index.js"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "mqtt": "^5.10.0",
+    "pg": "^8.13.1",
     "ws": "^8.18.0",
     "zod": "^4.1.5"
   }
