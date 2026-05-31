@@ -178,7 +178,7 @@ def _handle_weather():
         text += f"- 温度: {outdoor.get('temp', '--')} °C\n"
         text += f"- 体感: {outdoor.get('feelsLike', '--')} °C\n"
         text += f"- 湿度: {outdoor.get('humidity', '--')}%\n"
-        text += f"- 风向: {outdoor.get('windDir', '--')} {outdoor.get('windScale', '--')}级\n"
+        text += f"- 风向: {outdoor.get('windDir', '--')} {outdoor.get('windSpeed', '--')}km/h\n"
 
     if comp:
         text += f"\n### 对比分析\n"

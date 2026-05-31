@@ -125,28 +125,25 @@ mqttClient.on("message", async (_topic, payload) => {
 
 mqttClient.on("error", (err) => console.error("MQTT error:", err.message));
 
-// --- Weather comparison (uses device location from BSSID or fixed config) ---
-const WEATHER_API_KEY = process.env.WEATHER_API_KEY || "";
-const DEVICE_LOCATION = process.env.DEVICE_LOCATION || "121.47,31.23"; // lon,lat (Shanghai default)
+// --- Weather comparison (uses wttr.in, no API key needed) ---
+const DEVICE_LOCATION = process.env.DEVICE_LOCATION || "Shanghai";
 
 async function fetchOutdoorWeather() {
-  if (!WEATHER_API_KEY) return null;
-  const [lon, lat] = DEVICE_LOCATION.split(",");
-  const url = `https://devapi.qweather.com/v7/weather/now?location=${lon},${lat}&key=${WEATHER_API_KEY}`;
+  const url = `https://wttr.in/${encodeURIComponent(DEVICE_LOCATION)}?format=j1`;
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(url, { headers: { "User-Agent": "co2-api/1.0" } });
     const json = await resp.json();
-    if (json.code === "200" && json.now) {
-      return {
-        temp: parseFloat(json.now.temp),
-        humidity: parseFloat(json.now.humidity),
-        text: json.now.text,
-        windDir: json.now.windDir,
-        windScale: json.now.windScale,
-        feelsLike: parseFloat(json.now.feelsLike),
-        obsTime: json.now.obsTime,
-      };
-    }
+    const cur = json.current_condition && json.current_condition[0];
+    if (!cur) return null;
+    return {
+      temp: parseFloat(cur.temp_C),
+      humidity: parseFloat(cur.humidity),
+      text: cur.weatherDesc && cur.weatherDesc[0] && cur.weatherDesc[0].value || "",
+      windDir: cur.winddir16Point || "",
+      windSpeed: cur.windspeedKmph || "",
+      feelsLike: parseFloat(cur.FeelsLikeC),
+      obsTime: cur.observation_time || "",
+    };
   } catch (e) { /* ignore */ }
   return null;
 }
