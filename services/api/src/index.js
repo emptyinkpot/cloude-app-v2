@@ -1,158 +1,27 @@
 import cors from "cors";
 import express from "express";
 import { z } from "zod";
-import mqtt from "mqtt";
-import pg from "pg";
 import { WebSocketServer } from "ws";
 import { createServer } from "http";
 
-const { Pool } = pg;
+import { pool, waitForDB } from "./db.js";
+import { state, wsClients } from "./state.js";
+import { mqttClient, MQTT_CONTROL_TOPIC } from "./mqtt.js";
+import {
+  loessSmooth,
+  estimateRecentTrend,
+  holtWinters,
+  predictionErrorMetrics,
+  aggregateBySampleWindow,
+  adaptiveRegression,
+  pearsonCorr,
+} from "./predict.js";
+
 const app = express();
 const port = process.env.PORT || 3100;
 
 app.use(cors());
 app.use(express.json());
-
-// --- Database Setup (PostgreSQL) ---
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || "postgres://co2api:co2secret2026@localhost:5432/co2_data",
-});
-
-async function initDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS readings (
-      id SERIAL PRIMARY KEY,
-      ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      co2 INTEGER NOT NULL,
-      temperature REAL NOT NULL,
-      humidity REAL NOT NULL,
-      alarm INTEGER NOT NULL DEFAULT 0,
-      slope INTEGER DEFAULT 0,
-      eta INTEGER DEFAULT -1,
-      trend INTEGER DEFAULT 0,
-      device TEXT NOT NULL DEFAULT 'co2_001'
-    );
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings(ts);`);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS alerts (
-      id SERIAL PRIMARY KEY,
-      ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      level INTEGER NOT NULL,
-      co2 INTEGER NOT NULL,
-      message TEXT NOT NULL
-    );
-  `);
-}
-
-// Retry DB connection on startup (postgres may not be ready yet)
-async function waitForDB(retries = 10, delay = 2000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      await initDB();
-      console.log("PostgreSQL connected");
-      return;
-    } catch (err) {
-      console.log(`DB not ready (attempt ${i + 1}/${retries}): ${err.message}`);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  throw new Error("Could not connect to PostgreSQL after retries");
-}
-
-// --- State ---
-let latestData = null;
-let lastHeartbeat = 0;
-let alertSettings = { level1: 1000, level2: 1500, notifications: true };
-let lastAlertLevel = 0;
-
-// --- MQTT Connection ---
-const MQTT_BROKER = process.env.MQTT_BROKER || "mqtt://localhost:1883";
-const MQTT_USER = process.env.MQTT_USER || "b1362cdd5724c3f1b42f34fb10d921ee";
-const MQTT_PASS = process.env.MQTT_PASS || "youmeng2022";
-const MQTT_TOPIC = process.env.MQTT_TOPIC || "/iot/2139/stm32";
-const MQTT_CONTROL_TOPIC = process.env.MQTT_CONTROL_TOPIC || "/iot/2139/wx";
-
-const mqttClient = mqtt.connect(MQTT_BROKER, {
-  username: MQTT_USER,
-  password: MQTT_PASS,
-  clientId: `cloude_api_${Date.now()}`,
-  reconnectPeriod: 5000,
-});
-
-const wsClients = new Set();
-
-mqttClient.on("connect", () => {
-  console.log("MQTT connected to", MQTT_BROKER);
-  mqttClient.subscribe(MQTT_TOPIC);
-});
-
-
-mqttClient.on("message", async (_topic, payload) => {
-  try {
-    const data = JSON.parse(payload.toString());
-    latestData = { ...data, ts: new Date().toISOString() };
-    lastHeartbeat = Date.now();
-
-    await pool.query(
-      "INSERT INTO readings (co2, temperature, humidity, alarm, slope, eta, trend, device) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-      [data.co2, data.temp, data.hum, data.alarm, data.slope || 0, data.eta || -1, data.trend || 0, data.dev || "co2_001"]
-    );
-
-    // Alert logic
-    let currentLevel = 0;
-    if (data.co2 >= alertSettings.level2) currentLevel = 2;
-    else if (data.co2 >= alertSettings.level1) currentLevel = 1;
-
-    if (currentLevel > lastAlertLevel) {
-      const msg = currentLevel === 2
-        ? `CO2 达到 ${data.co2} ppm，超标报警！`
-        : `CO2 上升到 ${data.co2} ppm，建议通风。`;
-      await pool.query(
-        "INSERT INTO alerts (level, co2, message) VALUES ($1,$2,$3)",
-        [currentLevel, data.co2, msg]
-      );
-    }
-    lastAlertLevel = currentLevel;
-
-    // Broadcast to WebSocket clients
-    const wsMsg = JSON.stringify({ type: "realtime", data: latestData });
-    for (const ws of wsClients) {
-      if (ws.readyState === 1) ws.send(wsMsg);
-    }
-  } catch (e) { /* ignore malformed */ }
-});
-
-mqttClient.on("error", (err) => console.error("MQTT error:", err.message));
-
-// --- Weather comparison (uses sojson free API, China-accessible, no key needed) ---
-const DEVICE_CITY_CODE = process.env.DEVICE_CITY_CODE || "101020100"; // Shanghai
-
-async function fetchOutdoorWeather() {
-  const url = `http://t.weather.sojson.com/api/weather/city/${DEVICE_CITY_CODE}`;
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const resp = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    const json = await resp.json();
-    if (json.status !== 200 || !json.data) return null;
-    const d = json.data;
-    const today = d.forecast && d.forecast[0];
-    return {
-      temp: parseFloat(d.wendu),
-      humidity: parseInt(d.shidu),
-      text: today ? today.type : "",
-      windDir: today ? today.fx : "",
-      windScale: today ? today.fl : "",
-      feelsLike: parseFloat(d.wendu),
-      pm25: d.pm25,
-      quality: d.quality,
-    };
-  } catch (e) { /* timeout or network error */ }
-  return null;
-}
-
 
 // --- Schemas ---
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(6) });
@@ -166,9 +35,18 @@ const controlSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean()]),
 });
 
+// --- API Key auth ---
+const API_KEY = process.env.API_KEY || "co2-demo-key-2026";
+
+function requireApiKey(req, res, next) {
+  const key = req.headers["x-api-key"];
+  if (key !== API_KEY) return res.status(401).json({ error: "Invalid API key" });
+  next();
+}
+
 // --- REST Endpoints ---
 app.get("/api/v1/health", (_req, res) => {
-  res.json({ ok: true, mqtt: mqttClient.connected, lastHeartbeat });
+  res.json({ ok: true, mqtt: mqttClient.connected, lastHeartbeat: state.lastHeartbeat });
 });
 
 app.post("/api/v1/auth/login", (req, res) => {
@@ -182,7 +60,7 @@ app.get("/api/v1/auth/me", (_req, res) => {
 });
 
 app.get("/api/v1/realtime/co2", async (_req, res) => {
-  if (!latestData) {
+  if (!state.latestData) {
     const { rows } = await pool.query(
       "SELECT ts, co2, temperature, humidity, alarm, slope, eta, trend, device FROM readings ORDER BY id DESC LIMIT 1"
     );
@@ -203,14 +81,14 @@ app.get("/api/v1/realtime/co2", async (_req, res) => {
       online: false,
     });
   }
-  const online = Date.now() - lastHeartbeat < 15000;
-  res.json({ data: latestData, online });
+  const online = Date.now() - state.lastHeartbeat < 15000;
+  res.json({ data: state.latestData, online });
 });
 
 app.get("/api/v1/weather/compare", async (_req, res) => {
-  const indoor = latestData || {};
+  const indoor = state.latestData || {};
   const outdoor = await fetchOutdoorWeather();
-  const online = Date.now() - lastHeartbeat < 15000;
+  const online = Date.now() - state.lastHeartbeat < 15000;
   const result = {
     indoor: {
       co2: indoor.co2 || 0,
@@ -232,6 +110,32 @@ app.get("/api/v1/weather/compare", async (_req, res) => {
   res.json(result);
 });
 
+// --- Weather comparison (uses sojson free API, China-accessible, no key needed) ---
+const DEVICE_CITY_CODE = process.env.DEVICE_CITY_CODE || "101020100"; // Shanghai
+
+async function fetchOutdoorWeather() {
+  const url = `http://t.weather.sojson.com/api/weather/city/${DEVICE_CITY_CODE}`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    const json = await resp.json();
+    if (json.status !== 200 || !json.data) return null;
+    const d = json.data;
+    const today = d.forecast && d.forecast[0];
+    return {
+      temp: parseFloat(d.wendu),
+      humidity: parseInt(d.shidu),
+      text: today ? today.type : "",
+      feelsLike: parseFloat(d.wendu),
+      pm25: d.pm25,
+      quality: d.quality,
+    };
+  } catch { /* timeout or network error */ }
+  return null;
+}
+
 function getVentilationAdvice(indoor, outdoor) {
   if (indoor.co2 >= 1500) return "CO2 危险，立即开窗通风";
   if (indoor.co2 >= 1000 && outdoor.temp >= 5 && outdoor.temp <= 35)
@@ -242,7 +146,6 @@ function getVentilationAdvice(indoor, outdoor) {
     return "室内外温差大，通风时注意保暖";
   return "空气质量正常";
 }
-
 
 app.get("/api/v1/history/co2", async (req, res) => {
   const range = req.query.range || "1h";
@@ -256,129 +159,52 @@ app.get("/api/v1/history/co2", async (req, res) => {
   res.json({ range, count: rows.length, points: rows });
 });
 
-// --- Holt-Winters double exponential smoothing ---
-function holtWinters(data, alpha = 0.3, beta = 0.1, horizon = 30) {
-  if (data.length < 2) return [];
-  let level = data[0];
-  let trend = data[1] - data[0];
-
-  for (let i = 1; i < data.length; i++) {
-    const prevLevel = level;
-    level = alpha * data[i] + (1 - alpha) * (level + trend);
-    trend = beta * (level - prevLevel) + (1 - beta) * trend;
+// --- Fitted curve: smoothed history + recent-trend forecast extension ---
+app.get("/api/v1/fitted/co2", async (req, res) => {
+  const range = req.query.range || "1h";
+  const rangeMap = { "1h": 720, "6h": 4320, "24h": 17280, "7d": 120960 };
+  const limit = rangeMap[range] || 720;
+  const forecastMin = parseInt(req.query.forecast) || 30;
+  const { rows } = await pool.query(
+    "SELECT ts, co2 FROM readings ORDER BY id DESC LIMIT $1",
+    [limit]
+  );
+  rows.reverse();
+  if (rows.length < 3) {
+    return res.json({ range, fitted: [], forecast: [], model: null });
   }
-
-  const predictions = [];
-  for (let i = 1; i <= horizon; i++) {
-    predictions.push(Math.round(level + trend * i));
+  const values = rows.map((r) => r.co2);
+  const n = values.length;
+  const fittedValues = loessSmooth(values, 0.18);
+  fittedValues[n - 1] = values[n - 1];
+  const fitted = rows.map((r, i) => ({
+    ts: r.ts,
+    co2: Math.round(fittedValues[i]),
+  }));
+  const lastTs = new Date(rows[n - 1].ts).getTime();
+  const interval = n > 1
+    ? (new Date(rows[n - 1].ts).getTime() - new Date(rows[0].ts).getTime()) / (n - 1)
+    : 5000;
+  const forecastPoints = Math.round((forecastMin * 60 * 1000) / interval);
+  const trendPerSample = estimateRecentTrend(values, rows);
+  const forecast = [];
+  for (let i = 1; i <= forecastPoints; i++) {
+    const ts = new Date(lastTs + i * interval).toISOString();
+    const damping = Math.pow(0.94, i - 1);
+    forecast.push({ ts, co2: Math.round(values[n - 1] + trendPerSample * i * damping) });
   }
-  return predictions;
-}
-
-function predictionErrorMetrics(minuteData) {
-  if (minuteData.length < 4) {
-    return { mae: null, rmse: null, samples: 0, basis: "rolling_1min_backtest" };
-  }
-  const errors = [];
-  for (let i = 3; i < minuteData.length; i++) {
-    const train = minuteData.slice(0, i);
-    const forecast = holtWinters(train, 0.4, 0.15, 1)[0];
-    if (Number.isFinite(forecast)) {
-      errors.push(forecast - minuteData[i]);
-    }
-  }
-  if (errors.length === 0) {
-    return { mae: null, rmse: null, samples: 0, basis: "rolling_1min_backtest" };
-  }
-  const mae = errors.reduce((sum, error) => sum + Math.abs(error), 0) / errors.length;
-  const rmse = Math.sqrt(errors.reduce((sum, error) => sum + error ** 2, 0) / errors.length);
-  return {
-    mae: Math.round(mae * 10) / 10,
-    rmse: Math.round(rmse * 10) / 10,
-    samples: errors.length,
-    basis: "rolling_1min_backtest"
-  };
-}
-
-function aggregateBySampleWindow(data, windowSize) {
-  const buckets = [];
-  for (let i = 0; i < data.length; i += windowSize) {
-    const slice = data.slice(i, i + windowSize);
-    if (slice.length > 0) {
-      buckets.push(slice.reduce((sum, value) => sum + value, 0) / slice.length);
-    }
-  }
-  return buckets;
-}
-
-// --- Adaptive regression: picks best model (linear vs quadratic) on short window ---
-function adaptiveRegression(data) {
-  const n = data.length;
-  if (n < 3) return { slope: 0, accel: 0, r2: 0, model: "none" };
-
-  // Linear regression
-  let sx = 0, sy = 0, sxy = 0, sx2 = 0;
-  for (let i = 0; i < n; i++) {
-    sx += i; sy += data[i]; sxy += i * data[i]; sx2 += i * i;
-  }
-  const linDenom = n * sx2 - sx * sx;
-  let linB = 0, linA = 0;
-  if (Math.abs(linDenom) > 1e-6) {
-    linB = (n * sxy - sx * sy) / linDenom;
-    linA = (sy - linB * sx) / n;
-  }
-  let linSsRes = 0, ssTot = 0;
-  const mean = sy / n;
-  for (let i = 0; i < n; i++) {
-    linSsRes += (data[i] - (linA + linB * i)) ** 2;
-    ssTot += (data[i] - mean) ** 2;
-  }
-  const linR2 = ssTot > 0 ? Math.max(0, 1 - linSsRes / ssTot) : 1;
-
-  // Quadratic regression
-  let qsx = 0, qsx2 = 0, qsx3 = 0, qsx4 = 0;
-  let qsy = 0, qsxy = 0, qsx2y = 0;
-  for (let i = 0; i < n; i++) {
-    qsx += i; qsx2 += i*i; qsx3 += i*i*i; qsx4 += i*i*i*i;
-    qsy += data[i]; qsxy += i*data[i]; qsx2y += i*i*data[i];
-  }
-  const qd = n*(qsx2*qsx4-qsx3*qsx3) - qsx*(qsx*qsx4-qsx3*qsx2) + qsx2*(qsx*qsx3-qsx2*qsx2);
-  let qa = 0, qb = 0, qc = 0;
-  if (Math.abs(qd) > 1e-6) {
-    qc = (qsy*(qsx2*qsx4-qsx3*qsx3)-qsx*(qsxy*qsx4-qsx2y*qsx3)+qsx2*(qsxy*qsx3-qsx2y*qsx2))/qd;
-    qb = (n*(qsxy*qsx4-qsx2y*qsx3)-qsy*(qsx*qsx4-qsx3*qsx2)+qsx2*(qsx*qsx2y-qsxy*qsx2))/qd;
-    qa = (n*(qsx2*qsx2y-qsx3*qsxy)-qsx*(qsx*qsx2y-qsxy*qsx2)+qsy*(qsx*qsx3-qsx2*qsx2))/qd;
-  }
-  let quadSsRes = 0;
-  for (let i = 0; i < n; i++) {
-    quadSsRes += (data[i] - (qa*i*i + qb*i + qc)) ** 2;
-  }
-  const quadR2 = ssTot > 0 ? Math.max(0, 1 - quadSsRes / ssTot) : 1;
-
-  if (quadR2 > linR2 && quadR2 > 0.7) {
-    const deriv1 = 2 * qa * (n - 1) + qb;
-    const deriv2 = 2 * qa;
-    return { slope: deriv1, accel: deriv2, r2: quadR2, model: "quadratic", a: qa, b: qb, c: qc };
-  }
-  return { slope: linB, accel: 0, r2: linR2, model: "linear", a: 0, b: linB, c: linA };
-}
-
-// --- Pearson correlation ---
-function pearsonCorr(x, y) {
-  const n = x.length;
-  if (n < 3) return 0;
-  let mx = 0, my = 0;
-  for (let i = 0; i < n; i++) { mx += x[i]; my += y[i]; }
-  mx /= n; my /= n;
-  let sxy = 0, sx2 = 0, sy2 = 0;
-  for (let i = 0; i < n; i++) {
-    sxy += (x[i] - mx) * (y[i] - my);
-    sx2 += (x[i] - mx) ** 2;
-    sy2 += (y[i] - my) ** 2;
-  }
-  if (sx2 < 1 || sy2 < 1) return 0;
-  return sxy / Math.sqrt(sx2 * sy2);
-}
+  res.json({
+    range,
+    count: rows.length,
+    model: {
+      type: "loess",
+      bandwidth: 0.18,
+      trend_per_sample: Math.round(trendPerSample * 1000) / 1000
+    },
+    fitted,
+    forecast,
+  });
+});
 
 // --- CO2 Prediction Endpoint (multi-variable fusion) ---
 app.get("/api/v1/predict/co2", async (_req, res) => {
@@ -398,8 +224,8 @@ app.get("/api/v1/predict/co2", async (_req, res) => {
 
     if (rows.length < 2) {
       return res.json({
-        current: latestData?.co2 ?? null,
-        filtered: latestData?.co2 ?? null,
+        current: state.latestData?.co2 ?? null,
+        filtered: state.latestData?.co2 ?? null,
         slope: 0,
         accel: 0,
         confidence: 0,
@@ -511,10 +337,10 @@ app.get("/api/v1/predict/co2", async (_req, res) => {
 });
 
 app.get("/api/v1/devices", (_req, res) => {
-  const online = Date.now() - lastHeartbeat < 15000;
+  const online = Date.now() - state.lastHeartbeat < 15000;
   res.json({ items: [
     { id: "co2-sensor-01", name: "CO2 检测终端", type: "SCD41 + STM32", isOnline: online,
-      currentValue: latestData?.co2 || 0, unit: "ppm", lastSeen: latestData?.ts },
+      currentValue: state.latestData?.co2 || 0, unit: "ppm", lastSeen: state.latestData?.ts },
   ]});
 });
 
@@ -523,23 +349,14 @@ app.get("/api/v1/alerts", async (_req, res) => {
   res.json({ items: rows });
 });
 
-app.get("/api/v1/analytics/co2-alert-settings", (_req, res) => res.json(alertSettings));
+app.get("/api/v1/analytics/co2-alert-settings", (_req, res) => res.json(state.alertSettings));
 
-app.put("/api/v1/analytics/co2-alert-settings", (req, res) => {
+app.put("/api/v1/analytics/co2-alert-settings", requireApiKey, (req, res) => {
   const parsed = alertSettingsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  alertSettings = parsed.data;
-  res.json(alertSettings);
+  state.alertSettings = parsed.data;
+  res.json(state.alertSettings);
 });
-
-// --- AI Public API (API Key auth) ---
-const API_KEY = process.env.API_KEY || "co2-demo-key-2026";
-
-function requireApiKey(req, res, next) {
-  const key = req.headers["x-api-key"] || req.query.apikey;
-  if (key !== API_KEY) return res.status(401).json({ error: "Invalid API key" });
-  next();
-}
 
 // --- Control Endpoint (publish to MQTT) ---
 app.post("/api/v1/control", requireApiKey, (req, res) => {
@@ -554,9 +371,8 @@ app.post("/api/v1/control", requireApiKey, (req, res) => {
 });
 
 app.get("/api/v1/public/co2/current", requireApiKey, (_req, res) => {
-  res.json({ data: latestData, online: Date.now() - lastHeartbeat < 15000 });
+  res.json({ data: state.latestData, online: Date.now() - state.lastHeartbeat < 15000 });
 });
-
 
 app.get("/api/v1/public/co2/history", requireApiKey, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
@@ -570,11 +386,10 @@ app.get("/api/v1/public/co2/history", requireApiKey, async (req, res) => {
 
 app.get("/api/v1/public/device/status", requireApiKey, (_req, res) => {
   res.json({
-    device: "co2_001", online: Date.now() - lastHeartbeat < 15000,
-    lastData: latestData, alertSettings,
+    device: "co2_001", online: Date.now() - state.lastHeartbeat < 15000,
+    lastData: state.latestData, alertSettings: state.alertSettings,
   });
 });
-
 
 // --- OpenAPI Docs ---
 app.get("/api/docs", (_req, res) => {
@@ -584,10 +399,19 @@ app.get("/api/docs", (_req, res) => {
     servers: [{ url: "/" }],
     paths: {
       "/api/v1/health": { get: { summary: "Health check", responses: { 200: { description: "OK" } } } },
+      "/api/v1/auth/login": { post: { summary: "Demo account login", requestBody: { content: { "application/json": { schema: { type: "object", properties: { email: { type: "string", format: "email" }, password: { type: "string", minLength: 6 } }, required: ["email","password"] } } } }, responses: { 200: { description: "Token and user" }, 400: { description: "Validation error" } } } },
+      "/api/v1/auth/me": { get: { summary: "Current demo user", responses: { 200: { description: "User info" } } } },
       "/api/v1/realtime/co2": { get: { summary: "Get latest CO2 reading", responses: { 200: { description: "Current data" } } } },
+      "/api/v1/weather/compare": { get: { summary: "Indoor vs outdoor weather comparison and ventilation advice", responses: { 200: { description: "Comparison result" } } } },
       "/api/v1/history/co2": { get: { summary: "Get historical readings", parameters: [{ name: "range", in: "query", schema: { type: "string", enum: ["1h","6h","24h","7d"] } }], responses: { 200: { description: "Historical points" } } } },
+      "/api/v1/fitted/co2": { get: { summary: "LOESS-smoothed history with recent-trend forecast extension", parameters: [{ name: "range", in: "query", schema: { type: "string", enum: ["1h","6h","24h","7d"] } }, { name: "forecast", in: "query", schema: { type: "integer" }, description: "forecast minutes" }], responses: { 200: { description: "Fitted and forecast points" } } } },
+      "/api/v1/predict/co2": { get: { summary: "Multi-variable fusion prediction (adaptive regression + Holt-Winters)", responses: { 200: { description: "Prediction, confidence, correlation, error metrics, ETA" } } } },
       "/api/v1/devices": { get: { summary: "List devices", responses: { 200: { description: "Device list" } } } },
       "/api/v1/alerts": { get: { summary: "Get recent alerts", responses: { 200: { description: "Alert list" } } } },
+      "/api/v1/analytics/co2-alert-settings": {
+        get: { summary: "Get current alert thresholds", responses: { 200: { description: "Alert settings" } } },
+        put: { summary: "Update alert thresholds", security: [{ ApiKey: [] }], requestBody: { content: { "application/json": { schema: { type: "object", properties: { level1: { type: "integer", minimum: 400, maximum: 5000 }, level2: { type: "integer", minimum: 400, maximum: 5000 }, notifications: { type: "boolean" } }, required: ["level1","level2","notifications"] } } } }, responses: { 200: { description: "Updated settings" }, 400: { description: "Validation error" }, 401: { description: "Invalid API key" } } },
+      },
       "/api/v1/control": { post: { summary: "Send control command via MQTT", security: [{ ApiKey: [] }], requestBody: { content: { "application/json": { schema: { type: "object", properties: { target: { type: "string" }, value: {} }, required: ["target","value"] } } } }, responses: { 200: { description: "Command sent" } } } },
       "/api/v1/public/co2/current": { get: { summary: "Public current CO2", security: [{ ApiKey: [] }], responses: { 200: { description: "Current data" } } } },
       "/api/v1/public/co2/history": { get: { summary: "Public history", security: [{ ApiKey: [] }], responses: { 200: { description: "Historical data" } } } },
@@ -597,14 +421,13 @@ app.get("/api/docs", (_req, res) => {
   });
 });
 
-
 // --- HTTP + WebSocket Server ---
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/realtime" });
 
 wss.on("connection", (ws) => {
   wsClients.add(ws);
-  if (latestData) ws.send(JSON.stringify({ type: "realtime", data: latestData }));
+  if (state.latestData) ws.send(JSON.stringify({ type: "realtime", data: state.latestData }));
   ws.on("close", () => wsClients.delete(ws));
 });
 
@@ -618,3 +441,7 @@ waitForDB().then(() => {
   console.error("Fatal:", err.message);
   process.exit(1);
 });
+
+
+
+

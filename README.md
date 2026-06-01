@@ -67,12 +67,14 @@ API 位于 `services/api`，基于 Express、MQTT、PostgreSQL、WebSocket 和 Z
 | `POST` | `/api/v1/auth/login` | 演示账号登录 |
 | `GET` | `/api/v1/auth/me` | 当前演示用户信息 |
 | `GET` | `/api/v1/realtime/co2` | 最新 CO2 实时数据 |
+| `GET` | `/api/v1/weather/compare` | 室内外天气对比与通风建议 |
 | `GET` | `/api/v1/history/co2?range=1h|6h|24h|7d` | 历史 CO2 数据 |
+| `GET` | `/api/v1/fitted/co2?range=1h|6h|24h|7d&forecast=30` | LOESS 平滑历史曲线加趋势外推预测 |
 | `GET` | `/api/v1/predict/co2` | 多变量融合预测结果 |
 | `GET` | `/api/v1/devices` | 设备列表和在线状态 |
 | `GET` | `/api/v1/alerts` | 最近告警记录 |
 | `GET` | `/api/v1/analytics/co2-alert-settings` | 当前告警阈值 |
-| `PUT` | `/api/v1/analytics/co2-alert-settings` | 更新告警阈值 |
+| `PUT` | `/api/v1/analytics/co2-alert-settings` | API Key 鉴权后更新告警阈值 |
 | `POST` | `/api/v1/control` | API Key 鉴权后下发 MQTT 控制命令 |
 | `GET` | `/api/v1/public/co2/current` | API Key 鉴权的当前数据 |
 | `GET` | `/api/v1/public/co2/history` | API Key 鉴权的历史数据 |
