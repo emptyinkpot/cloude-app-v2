@@ -59,7 +59,7 @@ function initChart(){
   const ctx=document.getElementById('c').getContext('2d');
   chart=new Chart(ctx,{type:'line',data:{labels:[],datasets:[
     {label:'CO2 实际',data:[],borderColor:'#4fc3f7',backgroundColor:'rgba(79,195,247,0.05)',borderWidth:1.5,fill:true,tension:0.3,pointRadius:0},
-    {label:'CO2 预测',data:[],borderColor:'#ffaa00',borderWidth:1.5,borderDash:[5,3],fill:false,tension:0.3,pointRadius:0}
+    {label:'CO2 拟合',data:[],borderColor:'#ffaa00',borderWidth:1.5,borderDash:[],fill:false,tension:0.4,pointRadius:0}
   ]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:300},
     interaction:{intersect:false,mode:'index'},
     scales:{x:{ticks:{color:'#555',maxTicksLimit:8,font:{size:9}},grid:{color:'rgba(255,255,255,0.04)'}},
@@ -106,30 +106,25 @@ async function fetchHistory(){
   }catch(e){console.warn('history err',e)}
 }
 
-async function fetchPrediction(){
+async function fetchFitted(){
   try{
-    const r=await fetch(API+'/api/v1/predict/co2');
+    const r=await fetch(API+'/api/v1/fitted/co2?range=1h');
     const j=await r.json();
-    if(j.prediction&&j.prediction.points){
-      const pp=j.prediction.points;
-      const labels=chart.data.labels.slice();
-      const actual=chart.data.datasets[0].data.slice();
-      const pred=new Array(actual.length).fill(null);
-      const now=new Date();
-      pp.forEach((p,i)=>{
-        const future=new Date(now.getTime()+(i+1)*60000);
-        const lbl=future.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-        labels.push(lbl);actual.push(null);pred.push(p.co2);
-      });
-      chart.data.labels=labels;
-      chart.data.datasets[0].data=actual;
-      chart.data.datasets[1].data=pred;
-      chart.update('none');
-    }
-    if(j.confidence!=null)document.getElementById('pConf').textContent=(j.confidence>1?j.confidence.toFixed(0):(j.confidence*100).toFixed(0))+'%';
-    if(j.error&&j.error.mae!=null)document.getElementById('pErr').textContent='±'+j.error.mae+'ppm';
-    if(j.trend)document.getElementById('pTrend').textContent=j.trend;
-  }catch(e){console.warn('predict err',e)}
+    const fitted=j.fitted||[];
+    const forecast=j.forecast||[];
+    const histLabels=chart.data.labels.slice();
+    const histActual=chart.data.datasets[0].data.slice();
+    const fittedData=fitted.map(p=>p.co2);
+    const forecastData=forecast.map(p=>p.co2);
+    const forecastLabels=forecast.map(p=>new Date(p.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
+    const allLabels=[...histLabels,...forecastLabels];
+    const allActual=[...histActual,...new Array(forecastLabels.length).fill(null)];
+    const allFitted=[...fittedData,...forecastData];
+    chart.data.labels=allLabels;
+    chart.data.datasets[0].data=allActual;
+    chart.data.datasets[1].data=allFitted;
+    chart.update('none');
+  }catch(e){console.warn('fitted err',e)}
 }
 
 async function fetchHealth(){
@@ -169,14 +164,12 @@ function connectWS(){
 (function boot(){
   initChart();
   fetchRealtime();
-  fetchHistory();
-  fetchPrediction();
+  fetchHistory().then(()=>fetchFitted());
   fetchHealth();
   connectWS();
   setInterval(fetchRealtime,5000);
-  setInterval(fetchHistory,60000);
+  setInterval(()=>fetchHistory().then(()=>fetchFitted()),60000);
   setInterval(fetchHealth,15000);
-  setInterval(fetchPrediction,60000);
 })();
 </script>
 </body>

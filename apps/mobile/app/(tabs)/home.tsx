@@ -38,29 +38,23 @@ interface HistoryResponse {
   points: HistoryPoint[];
 }
 
-interface PredictResponse {
-  current?: number | null;
-  filtered?: number | null;
-  slope?: number;
-  confidence?: number;
-  trend?: string;
-  model?: string;
-  correlation?: { co2_temp: number; co2_hum: number };
-  env_factor?: number;
-  algorithm?: string;
-  error?: { mae: number | null; rmse: number | null; samples: number; basis: string };
-  prediction?: { points: { t: string; co2: number }[] };
+interface FittedPoint {
+  ts: string;
+  co2: number;
+}
+
+interface FittedResponse {
+  range: string;
+  count: number;
+  model: { a: number; b: number; c: number; r2: number };
+  fitted: FittedPoint[];
+  forecast: FittedPoint[];
 }
 
 interface ChartPoint {
   label: string;
   value: number;
   time: number;
-}
-
-interface PredictionPoint {
-  t: string;
-  co2: number;
 }
 
 export default function HomeScreen() {
@@ -81,33 +75,29 @@ export default function HomeScreen() {
   const [predictionMae, setPredictionMae] = useState<number | null>(null);
   const [predictionRmse, setPredictionRmse] = useState<number | null>(null);
   const [historyPoints, setHistoryPoints] = useState<ChartPoint[]>([]);
-  const [predictData, setPredictData] = useState<PredictionPoint[]>([]);
+  const [forecastPoints, setForecastPoints] = useState<ChartPoint[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
-  const predictionLoadingRef = useRef(false);
-  const lastPredictionRequestRef = useRef(0);
+  const fittedLoadingRef = useRef(false);
+  const lastFittedRequestRef = useRef(0);
 
-  const loadPrediction = useCallback((force = false) => {
+  const loadFitted = useCallback((force = false) => {
     const now = Date.now();
-    if (!force && now - lastPredictionRequestRef.current < 4500) return;
-    if (predictionLoadingRef.current) return;
-    predictionLoadingRef.current = true;
-    lastPredictionRequestRef.current = now;
+    if (!force && now - lastFittedRequestRef.current < 4500) return;
+    if (fittedLoadingRef.current) return;
+    fittedLoadingRef.current = true;
+    lastFittedRequestRef.current = now;
 
-    fetchApi<PredictResponse>("/api/v1/predict/co2")
+    fetchApi<FittedResponse>("/api/v1/fitted/co2?range=1h")
       .then((res) => {
-        setTrendLabel(res.trend ?? "--");
-        setModel(res.model ?? "--");
-        setConf(normalizePercent(res.confidence));
-        setEnvFactor(normalizePercent(res.env_factor));
-        setCo2TempCorr(res.correlation?.co2_temp ?? 0);
-        setCo2HumCorr(res.correlation?.co2_hum ?? 0);
-        setPredictionMae(res.error?.mae ?? null);
-        setPredictionRmse(res.error?.rmse ?? null);
-        setPredictData(res.prediction?.points ?? []);
+        const forecastRaw = (res.forecast || []).map((p) => {
+          return toChartPoint(p);
+        });
+        // Keep forecast readable while the chart x-axis still uses real timestamps.
+        setForecastPoints(downsamplePoints(forecastRaw, 45));
       })
       .catch(() => {})
       .finally(() => {
-        predictionLoadingRef.current = false;
+        fittedLoadingRef.current = false;
       });
   }, []);
 
@@ -124,7 +114,7 @@ export default function HomeScreen() {
         setOnline(res.online);
         setDeviceId(res.data.dev || "--");
         setUpdatedAt(res.data.ts || "--");
-        loadPrediction(true);
+        loadFitted(true);
       })
       .catch(() => {});
 
@@ -142,10 +132,10 @@ export default function HomeScreen() {
       })
       .catch(() => {});
 
-    loadPrediction(true);
-    const predictionTimer = setInterval(() => loadPrediction(true), 30000);
-    return () => clearInterval(predictionTimer);
-  }, [loadPrediction]);
+    loadFitted(true);
+    const fittedTimer = setInterval(() => loadFitted(true), 30000);
+    return () => clearInterval(fittedTimer);
+  }, [loadFitted]);
 
   useEffect(() => {
     disconnectRef.current = connectRealtime((data: RealtimeData) => {
@@ -159,7 +149,7 @@ export default function HomeScreen() {
       setOnline(true);
       setDeviceId(data.dev || "--");
       setUpdatedAt(data.ts || "--");
-      loadPrediction();
+      loadFitted();
       setHistoryPoints((points) => {
         const d = data.ts ? new Date(data.ts) : new Date();
         const next = [
@@ -174,11 +164,11 @@ export default function HomeScreen() {
       });
     });
     return () => { disconnectRef.current?.(); };
-  }, [loadPrediction]);
+  }, [loadFitted]);
 
   const level = resolveCo2Level(co2);
   const levelColor = getCo2LevelColor(level);
-  const chartPoints = useMemo(() => downsamplePoints(historyPoints, 90), [historyPoints]);
+  const chartPoints = useMemo(() => historyPoints, [historyPoints]);
 
   return (
     <Shell title="CO2 监测总览" subtitle="实时浓度、趋势预测与多变量融合分析">
@@ -210,7 +200,8 @@ export default function HomeScreen() {
           <Text style={styles.sectionTitle}>CO2 趋势曲线</Text>
           <Co2TrendChart
             actual={chartPoints}
-            prediction={predictData}
+            currentCo2={co2}
+            forecastPoints={forecastPoints}
             width={CHART_WIDTH}
             height={CHART_HEIGHT}
           />
@@ -219,10 +210,10 @@ export default function HomeScreen() {
               <View style={[styles.legendDot, { backgroundColor: "#4fc3f7" }]} />
               <Text style={styles.legendText}>实际值</Text>
             </View>
-            {predictData.length > 0 && (
+            {chartPoints.length > 2 && (
               <View style={styles.legendItem}>
                 <View style={[styles.legendDot, { backgroundColor: "#ffaa00" }]} />
-                <Text style={styles.legendText}>预测值</Text>
+                <Text style={styles.legendText}>拟合曲线</Text>
               </View>
             )}
           </View>
@@ -253,66 +244,70 @@ export default function HomeScreen() {
 
 function Co2TrendChart({
   actual,
-  prediction,
+  currentCo2,
+  forecastPoints,
   width,
   height
 }: {
   actual: ChartPoint[];
-  prediction: PredictionPoint[];
+  currentCo2: number;
+  forecastPoints: ChartPoint[];
   width: number;
   height: number;
 }) {
-  const actualValues = actual.map((point) => point.value);
-  const overlayPoints = actual.slice(-Math.min(actual.length, 45));
-  const latestOverlayValue = overlayPoints[overlayPoints.length - 1]?.value ?? actualValues[actualValues.length - 1];
-  const predictionOffset = prediction.length > 0
-    ? latestOverlayValue - prediction[0].co2
-    : 0;
-  const predictionValues = prediction.map((point) => point.co2 + predictionOffset);
-  const values = [
-    ...actualValues,
-    ...overlayPoints.map((point) => point.value),
-    ...predictionValues
-  ].filter(Number.isFinite);
+  const rawActualValues = actual.map((point) => point.value);
+  const lastKnownActualValue = rawActualValues[rawActualValues.length - 1] ?? 0;
+  const currentValue = Number.isFinite(currentCo2) && currentCo2 > 0
+    ? currentCo2
+    : lastKnownActualValue;
+  const renderedActual = actual.length > 0
+    ? [
+      ...actual.slice(0, -1),
+      { ...actual[actual.length - 1], value: currentValue }
+    ]
+    : actual;
+  const actualValues = renderedActual.map((point) => point.value);
+  const fitted = buildLocalFittedPoints(renderedActual);
+  const forecastValues = forecastPoints.map((p) => p.value);
+  const hasForecast = false;
+  const hasFitted = fitted.length > 0;
+
+  const values = actualValues.filter(Number.isFinite);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const yMin = Math.max(0, Math.floor((rawMin - 40) / 50) * 50);
   const yMax = Math.ceil((rawMax + 40) / 50) * 50;
   const plotWidth = width - CHART_PAD.left - CHART_PAD.right;
   const plotHeight = height - CHART_PAD.top - CHART_PAD.bottom;
-  const hasPrediction = prediction.length > 0;
-  const firstActualTime = actual[0]?.time ?? Date.now();
-  const lastActualTime = actual[actual.length - 1]?.time ?? firstActualTime;
-  const fitLeadMs = 10 * 60 * 1000;
-  const timelineStart = firstActualTime;
-  const timelineEnd = hasPrediction ? lastActualTime + fitLeadMs : lastActualTime + 1;
-  const toTimelineX = (time: number) =>
-    CHART_PAD.left + ((time - timelineStart) / Math.max(1, timelineEnd - timelineStart)) * plotWidth;
-  const predictionStartX = toTimelineX(lastActualTime);
-  const predictionEndX = CHART_PAD.left + plotWidth;
-  const toPredictionX = (index: number, total: number) =>
-    predictionStartX + (total <= 1 ? 0 : (index / (total - 1)) * (predictionEndX - predictionStartX));
+  const timeValues = renderedActual.map((point) => point.time).filter(Number.isFinite);
+  const timeStart = Math.min(...timeValues);
+  const timeEnd = Math.max(...timeValues);
+  const toChartX = (time: number) =>
+    CHART_PAD.left + ((time - timeStart) / Math.max(1, timeEnd - timeStart)) * plotWidth;
+  const forecastStartX = toChartX(lastKnownPointTime(renderedActual));
+  const forecastEndX = CHART_PAD.left + plotWidth;
+  const toForecastX = (index: number, total: number) =>
+    forecastStartX + (total <= 1 ? 0 : (index / (total - 1)) * (forecastEndX - forecastStartX));
   const toY = (value: number) =>
     CHART_PAD.top + ((yMax - value) / Math.max(1, yMax - yMin)) * plotHeight;
   const actualPath = buildPath(
-    actualValues,
-    (index) => toTimelineX(actual[index].time),
-    toY
+    renderedActual,
+    (index) => toChartX(renderedActual[index].time),
+    (point) => toY(point.value)
   );
-  const overlayPath = overlayPoints
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${toTimelineX(point.time).toFixed(1)} ${toY(point.value).toFixed(1)}`)
-    .join(" ");
-  const predictionSeries = hasPrediction ? predictionValues : [];
-  const predictionPath = buildPath(
-    predictionSeries,
-    (index) => toPredictionX(index + 1, predictionSeries.length + 1),
-    toY
-  );
-  const lastActual = actual[actual.length - 1];
-  const firstLabel = actual[0]?.label ?? "--";
+  const fittedPath = hasFitted
+    ? buildPath(
+        fitted,
+        (index) => toChartX(fitted[index].time),
+        (point) => toY(point.value)
+      )
+    : "";
+  const forecastPath = "";
+  const lastActual = renderedActual[renderedActual.length - 1];
+  const firstLabel = renderedActual[0]?.label ?? "--";
   const lastLabel = lastActual?.label ?? "--";
-  const lastActualX = predictionStartX;
-  const lastLabelX = hasPrediction
+  const lastActualX = toChartX(lastActual?.time ?? timeEnd);
+  const lastLabelX = hasForecast
     ? Math.min(Math.max(CHART_PAD.left, lastActualX - 20), width - CHART_PAD.right - 38)
     : width - CHART_PAD.right - 36;
   const ticks = [yMin, Math.round((yMin + yMax) / 2), yMax];
@@ -362,33 +357,35 @@ function Co2TrendChart({
           strokeLinecap="round"
           strokeLinejoin="round"
         />
-        {overlayPath && (
+        {fittedPath ? (
           <Path
-            d={overlayPath}
-            stroke="#ff8a00"
-            strokeWidth={5}
-            fill="none"
-            opacity={0.9}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        )}
-        {predictionPath && (
-          <Path
-            d={`M ${lastActualX.toFixed(1)} ${toY(latestOverlayValue).toFixed(1)} ${predictionPath.replace(/^M\s+/, "L ")}`}
+            d={fittedPath}
             stroke="#ffaa00"
-            strokeWidth={4}
+            strokeWidth={3}
             fill="none"
-            strokeDasharray="6 5"
+            opacity={0.95}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
-        )}
+        ) : null}
+        {forecastPath ? (
+          <Path
+            d={forecastPath}
+            stroke="#ffaa00"
+            strokeWidth={1.5}
+            fill="none"
+            opacity={0.8}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
         <Circle
           cx={lastActualX}
-          cy={toY(latestOverlayValue)}
-          r={5}
-          fill={hasPrediction ? "#ffaa00" : "#4fc3f7"}
+          cy={toY(currentValue)}
+          r={6}
+          fill={hasForecast ? "#ffaa00" : "#4fc3f7"}
+          stroke="#ffffff"
+          strokeWidth={2}
         />
         <SvgText x={CHART_PAD.left} y={height - 8} fill="#60727b" fontSize={10}>
           {firstLabel}
@@ -396,13 +393,13 @@ function Co2TrendChart({
         <SvgText x={lastLabelX} y={height - 8} fill="#60727b" fontSize={10}>
           {lastLabel}
         </SvgText>
-        {hasPrediction && (
+        {hasForecast && (
           <SvgText x={width - CHART_PAD.right - 38} y={height - 8} fill="#60727b" fontSize={10}>
-            {prediction[prediction.length - 1]?.t ?? `+${prediction.length}min`}
+            {forecastPoints[forecastPoints.length - 1]?.label ?? `+${forecastValues.length}min`}
           </SvgText>
         )}
         <SvgText x={width - CHART_PAD.right - 52} y={CHART_PAD.top + 12} fill="#102027" fontSize={11}>
-          {Math.round(lastActual.value)} ppm
+          {Math.round(currentValue)} ppm
         </SvgText>
       </Svg>
     </View>
@@ -419,6 +416,72 @@ function downsamplePoints(points: ChartPoint[], maxPoints: number) {
   if (points.length <= maxPoints) return points;
   const stride = Math.ceil(points.length / maxPoints);
   return points.filter((_, index) => index % stride === 0 || index === points.length - 1);
+}
+
+function buildLocalFittedPoints(points: ChartPoint[]): ChartPoint[] {
+  if (points.length < 3) return points;
+  const values = points.map((point) => point.value);
+  const fittedValues = loessSmooth(values, 0.06);
+  fittedValues[fittedValues.length - 1] = values[values.length - 1];
+  return points.map((point, index) => ({
+    ...point,
+    value: Math.round(fittedValues[index])
+  }));
+}
+
+function loessSmooth(values: number[], bandwidth: number) {
+  const n = values.length;
+  if (n < 3) return values.slice();
+  const halfWindow = Math.max(3, Math.floor((bandwidth * n) / 2));
+  const result = new Array<number>(n);
+
+  for (let i = 0; i < n; i++) {
+    const lo = Math.max(0, i - halfWindow);
+    const hi = Math.min(n - 1, i + halfWindow);
+    const maxDist = Math.max(i - lo, hi - i) || 1;
+    let sw = 0;
+    let swx = 0;
+    let swy = 0;
+    let swxx = 0;
+    let swxy = 0;
+
+    for (let j = lo; j <= hi; j++) {
+      const dist = Math.abs(j - i) / maxDist;
+      const t = 1 - dist * dist * dist;
+      const w = t > 0 ? t * t * t : 0;
+      const x = j;
+      const y = values[j];
+      sw += w;
+      swx += w * x;
+      swy += w * y;
+      swxx += w * x * x;
+      swxy += w * x * y;
+    }
+
+    const denom = sw * swxx - swx * swx;
+    if (Math.abs(denom) < 1e-9) {
+      result[i] = sw > 0 ? swy / sw : values[i];
+    } else {
+      const slope = (sw * swxy - swx * swy) / denom;
+      const intercept = (swy - slope * swx) / sw;
+      result[i] = intercept + slope * i;
+    }
+  }
+
+  return result;
+}
+
+function toChartPoint(point: FittedPoint): ChartPoint {
+  const d = new Date(point.ts);
+  return {
+    label: `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`,
+    value: point.co2,
+    time: d.getTime()
+  };
+}
+
+function lastKnownPointTime(points: ChartPoint[]) {
+  return points[points.length - 1]?.time ?? Date.now();
 }
 
 function buildPath<T>(
